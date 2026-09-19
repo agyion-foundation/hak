@@ -33,7 +33,6 @@ if (typeof window !== "undefined") {
 
 
 
-
 /**
  * Panic yerine tanimli hata kodlari (SPEC §3.3).
  */
