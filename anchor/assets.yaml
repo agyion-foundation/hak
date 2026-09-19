@@ -1,0 +1,101 @@
+# =============================================================================
+# HAK MVP — Anchor Platform assets.yaml (TESTNET)
+# =============================================================================
+# Temsili TRY token'ı: tTRY
+# - Issuer: bizim testnet hesabımız (SPEC §2 — USDC bağımlılığı YOK, clawback KAPALI)
+# - SEP-24 deposit/withdraw AÇIK (hosted/interactive akış)
+# - SEP-6/SEP-31 kapalı (MVP kapsamı dışı)
+# - SEP-38 açık: tTRY <-> iso4217:TRY kote edilebilir (1:1 temsili)
+#
+# Şema kaynağı: stellar/anchor-platform repo'su
+#   service-runner/src/main/resources/config/assets.yaml (varsayılan örnek)
+#   https://developers.stellar.org/platforms/anchor-platform
+#
+# NOT: Aşağıdaki issuer/distribution adresleri ÖRNEKTİR (bu repo için üretilmiş
+# testnet keypair'in PUBLIC anahtarı). Secret asla bu dosyaya yazılmaz; deploy
+# sırasında `scripts/deploy_testnet.sh` üretir/yönetir. Kendi ortamınızda
+# adresleri kendi testnet hesaplarınızla değiştirin.
+# =============================================================================
+items:
+  # --- Stellar varlığı: tTRY (temsili Türk Lirası) ---
+  - id: stellar:tTRY:GDWILFYQJDBZQPEJM3DLLXWKMPBDMQUAN6QPHT77V555GIHQOJUIIJBE
+    # Dağıtım (hot) hesabı: anchor'ın zincir üstü ödemeleri yaptığı hesap.
+    # MVP'de issuer ile aynı tutulabilir; prod'da ayrı olmalı.
+    distribution_account: GDWILFYQJDBZQPEJM3DLLXWKMPBDMQUAN6QPHT77V555GIHQOJUIIJBE
+    significant_decimals: 2
+    sep6:
+      enabled: false
+    sep24:
+      enabled: true
+      deposit:
+        enabled: true
+        min_amount: 1
+        max_amount: 50000
+        # Türkiye bağlamında anlamlı yöntem adları (serbest metin, SEP-24 kısıtlamaz)
+        methods:
+          - FAST
+          - EFT
+      withdraw:
+        enabled: true
+        min_amount: 5
+        max_amount: 50000
+        methods:
+          - bank_account
+    sep31:
+      enabled: false
+    sep38:
+      enabled: true
+      exchangeable_assets:
+        - iso4217:TRY
+
+  # --- Native XLM (testnet musluk işlemleri / ücret karşılığı; opsiyonel) ---
+  - id: stellar:native
+    distribution_account: GDWILFYQJDBZQPEJM3DLLXWKMPBDMQUAN6QPHT77V555GIHQOJUIIJBE
+    significant_decimals: 7
+    sep6:
+      enabled: false
+    sep24:
+      enabled: false
+      deposit:
+        enabled: false
+        min_amount: 0
+        max_amount: 10
+        methods:
+          - FAST
+      withdraw:
+        enabled: false
+        min_amount: 0
+        max_amount: 10
+        methods:
+          - bank_account
+    sep31:
+      enabled: false
+    sep38:
+      enabled: true
+      exchangeable_assets:
+        - iso4217:TRY
+
+  # --- Fiat tarafı: iso4217:TRY (zincir dışı bacağın temsili) ---
+  - id: iso4217:TRY
+    significant_decimals: 2
+    sep31:
+      enabled: false
+      receive:
+        min_amount: 0
+        max_amount: 1000000
+        methods:
+          - FAST
+          - EFT
+    sep38:
+      enabled: true
+      exchangeable_assets:
+        - stellar:tTRY:GDWILFYQJDBZQPEJM3DLLXWKMPBDMQUAN6QPHT77V555GIHQOJUIIJBE
+        - stellar:native
+      country_codes:
+        - TR
+      sell_delivery_methods:
+        - name: FAST
+          description: TRY'yi anchor'ın banka hesabına FAST ile gönderin (testnet simülasyonu).
+      buy_delivery_methods:
+        - name: FAST
+          description: TRY banka hesabınıza FAST ile gönderilir (testnet simülasyonu).
