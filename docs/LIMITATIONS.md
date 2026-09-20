@@ -27,10 +27,10 @@
 - **Impact:** All claims are traceable today; no privacy claim is made in the demo.
 - **Roadmap:** ZK membership/quota proofs for agent-less claims, built on Protocol 25's BN254 + Poseidon host functions; go/no-go follows a verification-cost measurement.
 
-## 5. Anchor side — testnet simulation
+## 5. Anchor side — official mock anchor, simulated bank leg
 
-- **Status:** tTRY is a representative token; the bank leg runs against the Anchor Platform **reference (mock) server**. No real FAST/EFT movement. Any "real TRY" claim requires organizer confirmation.
-- **Impact:** "The merchant sees only TRY" is demonstrated conceptually, not literally.
+- **Status:** we integrate the **official hackathon TR mock anchor** (`https://tr-mock-anchor.fly.dev`): SEP-6 programmatic TRY↔USDC ramp (USDC = Circle testnet issuer), SEP-10 auth, SEP-12 KYC, SEP-38 quotes, 0.5% fee, `bank_account` funding only. We did **not** build or operate this anchor. The bank leg is **simulated by the sandbox** — no real FAST/EFT movement, no real TRY. A self-host Anchor Platform (SEP-24, tTRY) configuration remains in `anchor/` as an offline fallback, equally simulated.
+- **Impact:** "The merchant sees only TRY" is demonstrated against a real SEP rail, but with simulated money movement — conceptually honest, not literal. Any "real TRY" claim requires organizer confirmation.
 - **Roadmap:** licensed anchor partnership; the regulated first-withdrawal waiting period (72 hours — **not to be confused with** the compliance freeze queue) becomes part of the product flow.
 
 ## 6. Envoy — negative-price-only restriction

@@ -1,6 +1,8 @@
-# anchor/ — HAK MVP Anchor Yapılandırması
+# anchor/ — Self-Host Anchor Alternatifi (demo yolu değil)
 
-Bu klasör, HAK'nin "esnaf sadece TRY görür" (CANON kural 4) vaadinin zincir/zincir-dışı köprüsünü testnet'te ayakta tutmak için gereken Anchor Platform yapılandırmasını ve notları içerir.
+> **Güncel durum:** Demo artık **resmî hackathon TR mock anchor'ını** kullanır: `https://tr-mock-anchor.fly.dev` — SEP-6 programatik TRY↔USDC rampası (SEP-24 **yok**), SEP-10 auth, SEP-12 KYC, SEP-38 quotes, %0.5 fee, `bank_account` funding. Uygulama entegrasyonu: `app/app/lib/anchor.ts` + On/Off-ramp sekmesi. Kendi anchor'ımızı kurduğumuz iddiası **geçerli değildir**; bu klasör yalnızca alternatif/çevrimdışı fallback olarak durur.
+
+Bu klasör, HAK'nin "esnaf sadece TRY görür" (CANON kural 4) vaadinin zincir/zincir-dışı köprüsünü kendi Anchor Platform kurulumuyla (alternatif yol) ayakta tutmak için gereken yapılandırmayı ve notları içerir.
 
 ## Ne var?
 
@@ -47,6 +49,7 @@ Demo anlatısında "esnafa gerçek TRY gitti" iddiası **organizatör teyidi ger
 
 Kendi anchor'ınızı kaldırmak yerine hazır test ortamları:
 
+- **tr-mock-anchor.fly.dev** — resmî hackathon TR mock anchor'ı; **birincil demo yolu budur** (SEP-6, TRY↔USDC). Uygulama bunu kutudan çıkar çıkmaz kullanır (`NEXT_PUBLIC_ANCHOR_URL`).
 - **testanchor.stellar.org** — SDF'in referans test anchor'ı (home domain: `testanchor.stellar.org`). SEP-24 akışını hızlıca denemek için en kestirme yol; ancak **tTRY tanımlı değildir** ve banka bacağı yine simülasyondur.
 - Kendi `tTRY`'nizi demo cüzdana elle trustline + `payment` ile dağıtmak (anchor'sız minimum yol): "anchor TRY" kriterinin zincir tarafını gösterir, SEP-24 etkileşimini göstermez.
 

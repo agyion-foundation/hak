@@ -7,7 +7,8 @@
 ## Pre-demo checklist (T-30 min)
 
 - [ ] Testnet deploy fresh (`./scripts/deploy_testnet.sh`), contract ID pinned in `app/.env.local`, smoke claim executed.
-- [ ] Fallback assets staged: full-flow screen recording (recorded at hour 18), localhost Docker anchor running, dual hotspots tested.
+- [ ] Official TR mock anchor reachable (`curl https://tr-mock-anchor.fly.dev/sep6/info`), On/Off-ramp tab smoke-tested (quote + deposit instructions).
+- [ ] Fallback assets staged: full-flow screen recording (recorded at hour 18), localhost Docker anchor running (self-host SEP-24 fallback), dual hotspots tested.
 - [ ] Two phones charged: one presenter phone (audience view), one venue/attester phone (signing view).
 - [ ] Pod QR printed (wall card): unlock ledger set to ~2035 equivalent.
 - [ ] Jury phone with the agent app paired for the Envoy scene; mandate parameters pre-filled (50 TRY, 2 hours).
@@ -49,6 +50,11 @@
 - Export a **Proof Pack** — a signed JSON of the user's own activity, verifiable against the chain.
 - **Say:** "Your money's memory belongs to you. This file is signed evidence — a merchant, an accountant, or a court can verify it without us, without a server, without asking anyone's permission."
 
+## Optional beat — the rail itself (if a juror asks "how does TRY get in?")
+
+- Open the **On/Off-ramp** tab: live SEP-38 quote (1 USDC ≈ mid-rate TRY, 0.5% spread), then "Get deposit instructions" — the anchor returns an IBAN + transfer reference.
+- **Say:** "This is the official hackathon TR mock anchor — SEP-10 authentication, SEP-6 programmatic deposit and withdraw, SEP-38 quotes. The bank transfer leg is a sandbox simulation and we say so on the screen. What's real is the rail: TRY in, USDC on Stellar, TRY back out to an IBAN. The merchant never touches crypto."
+
 ## Closing (4:40–5:00)
 
 **Say, slowly:** "Tonight you watched money die in a refund, get buried in a Pod, and resurrect through an agent — and everything stayed auditable. Agyion is conditional money: it locks, it executes itself when proven, it returns when it isn't. The QR on the wall opens in 2035. Until then — not even us."
@@ -60,7 +66,7 @@
 ### B1 — Venue internet dies
 1. Switch both phones to the dual hotspots (pre-paired, different carriers).
 2. If testnet is unreachable entirely: run the **full-flow recording** (hour-18 capture, same narrative beats, same lines) and say so out loud: "Testnet congestion is real; judges understand — here's the recorded run, and here are the live tx hashes from an hour ago."
-3. Anchor leg: fall back to the localhost Docker anchor (`anchor/README.md` quick-run) to show the SEP-24 flow offline from the public network.
+3. Anchor leg: the On/Off-ramp tab talks to `tr-mock-anchor.fly.dev` (SEP-6) — if the sandbox is unreachable, fall back to the localhost Docker anchor (`anchor/README.md` quick-run, SEP-24) and say so out loud.
 4. Never pretend a mock is live. CANON rule 12: an honest limitation beats an inflated demo — juries reward the confession, punish the discovery.
 
 ### B2 — No partner venue / no audience participation
@@ -94,13 +100,13 @@ Offline claims are single-hop by design: you prepare a claim in airplane mode an
 We swept 400+ queries across hackathon platforms, Reddit, HN, and Turkish forums: nobody combines negative pricing, a reverse price clock, and automatic no-show reclaim — the nearest products stop at positive discounts or forbid money entirely. Escrow waits for a human to release; our conditions execute themselves.
 
 **Q6. Why Stellar and not Ethereum/other chains?**
-The mechanics map onto native primitives: claimable balances with sender predicates give us rule-based reclaim, sponsored transactions make claims gasless, and preimage/policy signer patterns power Pod and Envoy. Five-second finality makes the price clock real-time, and the anchor model (SEP-24) is the only production-proven fiat rail story — the handbook weights it highest for a reason.
+The mechanics map onto native primitives: claimable balances with sender predicates give us rule-based reclaim, sponsored transactions make claims gasless, and preimage/policy signer patterns power Pod and Envoy. Five-second finality makes the price clock real-time, and the anchor model (SEP-6/SEP-24) is the only production-proven fiat rail story — the handbook weights it highest for a reason.
 
 **Q7. How do you make money?**
 The kernel is free and immutable — that's also the legal armor, since operational control is what regulators punish. Revenue lives off-protocol: the Loxias attester marketplace (service fees), a B2B SDK for venues and platforms, and Ledger Enterprise for audit exports.
 
 **Q8. Who is the anchor? Is the TRY real?**
-Today it's tTRY on testnet with the SDF Anchor Platform — the bank leg is simulated and we say so openly. Türkiye has no open SEP-24 TRY anchor yet; that white space is exactly the corridor a licensed partner fills in the production path.
+Today we integrate the official hackathon TR mock anchor (`tr-mock-anchor.fly.dev`): SEP-6 programmatic TRY↔USDC ramp, SEP-10 auth, SEP-38 quotes. The bank leg is simulated by the sandbox and we say so openly — no real FAST/EFT moves. Türkiye has no production TRY anchor yet; that white space is exactly the corridor a licensed partner fills in the production path. A self-host Anchor Platform (SEP-24) setup remains in `anchor/` as an offline fallback.
 
 **Q9. What if the venue and seller collude to fake handoffs?**
 Today the venue is a single mock signer and collusion is possible — it's item #1 in LIMITATIONS.md, not a secret. The roadmap answer is Loxias: an attester marketplace with staking, M-of-N attestations, and reputation, so proof stops depending on one key.
