@@ -2,41 +2,50 @@
 @tailwind components;
 @tailwind utilities;
 
-/* HAK — sıcak, düşük doyumlu zemin. Gradient yok (SPEC §4). */
+/* Agyion — warm editorial light theme (design_brief §1) */
 :root {
-  --background: #f6f1e7;
-  --foreground: #2b2620;
+  --font-serif: "Fraunces", Georgia, serif;
+  --font-sans: "Instrument Sans", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
 }
 
-body {
-  color: var(--foreground);
-  background: var(--background);
-  font-family:
-    ui-sans-serif,
-    system-ui,
-    -apple-system,
-    "Segoe UI",
-    Roboto,
-    "Helvetica Neue",
-    Arial,
-    sans-serif;
-  -webkit-font-smoothing: antialiased;
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+  body {
+    @apply bg-paper font-sans text-ink antialiased;
+  }
+  ::selection {
+    background: #bc773f;
+    color: #faf6f3;
+  }
 }
 
-::selection {
-  background: #efe4cf;
-  color: #2b2620;
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+  /* Thin scrollbars for ledger panels */
+  .scrollbar-thin::-webkit-scrollbar {
+    height: 6px;
+    width: 6px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: #dec9b8;
+    border-radius: 3px;
+  }
 }
 
-input,
-textarea,
-select {
-  font: inherit;
+/* Framer-motion path drawing */
+.motion-path-draw {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
 }
 
-input:focus-visible,
-textarea:focus-visible,
-button:focus-visible {
-  outline: 2px solid #b0572f;
-  outline-offset: 2px;
+/* Reduced motion: the whole site remains legible (motion ethics §3.4) */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
 }
