@@ -1,22 +1,55 @@
 "use client";
 
 /**
- * Lifeline — a thin 1px vertical line fixed to the viewport edge
- * (design_brief §3.2). In the app theme it carries data: the current ledger
- * number sits inside the line. Ambient, non-interactive.
+ * Lifeline — one continuous pale-sand stroke flowing down the page margin,
+ * drawn via pathLength mapped to global scroll (§3.2). The "wire" the money
+ * travels. Desktop only.
  */
 
-import { motion } from "framer-motion";
+import { useEffect, useState } from "react";
+import { motion, useScroll, useSpring, useReducedMotion } from "framer-motion";
 
 export default function Lifeline() {
+  const reduced = useReducedMotion();
+  const { scrollYProgress } = useScroll();
+  const len = useSpring(scrollYProgress, { stiffness: 90, damping: 26 });
+  const [height, setHeight] = useState(2400);
+
+  useEffect(() => {
+    const measure = () => setHeight(Math.max(document.body.scrollHeight, 1600));
+    measure();
+    window.addEventListener("resize", measure);
+    const t = setTimeout(measure, 1500);
+    return () => {
+      window.removeEventListener("resize", measure);
+      clearTimeout(t);
+    };
+  }, []);
+
+  if (reduced) return null;
+
+  // gentle serpentine down the left margin
+  const w = 60;
+  const seg = 260;
+  const n = Math.ceil(height / seg);
+  let d = `M ${w / 2} 0`;
+  for (let i = 0; i < n; i++) {
+    const y0 = i * seg;
+    const dir = i % 2 === 0 ? 1 : -1;
+    d += ` C ${w / 2 + 26 * dir} ${y0 + seg * 0.35}, ${w / 2 - 26 * dir} ${y0 + seg * 0.65}, ${w / 2} ${y0 + seg}`;
+  }
+
   return (
-    <motion.div
-      aria-hidden
-      className="pointer-events-none fixed bottom-0 left-1/2 top-0 z-0 w-px bg-sand/60"
-      initial={{ scaleY: 0 }}
-      animate={{ scaleY: 1 }}
-      transition={{ duration: 1.6, ease: [1, 0, 0.3, 0.93] }}
-      style={{ transformOrigin: "top" }}
-    />
+    <div className="pointer-events-none fixed left-3 top-0 z-0 hidden h-full xl:block" aria-hidden>
+      <svg width={w} height={height} className="h-full">
+        <motion.path
+          d={d}
+          stroke="var(--sand)"
+          strokeWidth="1.5"
+          fill="none"
+          style={{ pathLength: len }}
+        />
+      </svg>
+    </div>
   );
 }

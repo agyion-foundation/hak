@@ -1,64 +1,82 @@
 "use client";
 
 /**
- * Compliance — two-column block (design_brief §4.5):
- * left: what the contract guarantees; right: what it explicitly does NOT.
- * Limits live in the open (LIMITATIONS.md); the footer mirrors them.
+ * Compliance — two-column asymmetric (§4.5): plain-language paragraphs left,
+ * a ledger-style mono table of visible vs. sealed right. Quiet, no badges.
  */
 
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import { Eyebrow } from "../ui";
 
-const DOES = [
-  "Non-custodial: funds move only by the rules",
-  "Every credential is ed25519 / sha256, verifiable by anyone",
-  "Refunds are rule-based — no operator discretion",
-  "First valid transition wins; state never moves twice",
+const ROWS: [string, string, string][] = [
+  ["Rule parameters", "visible", "amounts, deadlines, caps, curve"],
+  ["State transitions", "visible", "lock → claim → execute / return"],
+  ["Signatures", "visible", "ed25519 proofs, verifiable by anyone"],
+  ["Counterparty identity", "sealed", "addresses only; KYC hooks at the edges"],
+  ["Pod preimage", "sealed", "sha256 hash on-chain; the secret never is"],
+  ["Agent scope", "visible", "mandate limits are public by design"],
 ];
-
-const DOESNT = [
-  "No upgrade key — a bug means redeploy, not a silent patch",
-  "TTL: records past ~10 days idle may need a chain-side restore",
-  "The venue/attester key is a trust point (documented, scoped)",
-  "No fiat on-ramp, no KYC — testnet demo scope",
-];
-
-function Column({ title, items, accent }: { title: string; items: string[]; accent: boolean }) {
-  return (
-    <motion.div
-      initial={{ y: 24, opacity: 0 }}
-      whileInView={{ y: 0, opacity: 1 }}
-      viewport={{ once: true, margin: "-80px" }}
-      transition={{ duration: 0.6, ease: [1, 0, 0.3, 0.93] }}
-      className="rounded-2xl border border-hairline bg-paper p-8"
-    >
-      <h3
-        className={`mb-6 font-mono text-[11px] uppercase tracking-widest ${accent ? "text-olive" : "text-ember"}`}
-      >
-        {title}
-      </h3>
-      <ul className="space-y-4">
-        {items.map((it) => (
-          <li key={it} className="flex gap-3 text-sm leading-relaxed">
-            <span className={accent ? "text-olive" : "text-ember"}>{accent ? "✓" : "✕"}</span>
-            <span>{it}</span>
-          </li>
-        ))}
-      </ul>
-    </motion.div>
-  );
-}
 
 export default function Compliance() {
+  const reduced = useReducedMotion();
   return (
-    <section className="mx-auto max-w-6xl px-6 py-32">
-      <Eyebrow>in the open</Eyebrow>
-      <h2 className="mb-16 max-w-2xl font-serif text-4xl leading-tight tracking-tight md:text-5xl">
-        What it guarantees — and what it doesn&apos;t.
-      </h2>
-      <div className="grid gap-6 md:grid-cols-2">
-        <Column title="the contract does" items={DOES} accent />
-        <Column title="the contract does not" items={DOESNT} accent={false} />
+    <section id="compliance" className="mx-auto max-w-[1200px] px-6 py-28 md:py-40">
+      <div className="grid grid-cols-1 gap-14 md:grid-cols-12">
+        <div className="md:col-span-5">
+          <Eyebrow>Compliance &amp; privacy</Eyebrow>
+          <h2 className="display mt-4 text-[36px] leading-[1.1] text-ink md:text-[56px]">
+            Auditable where it matters, sealed where it counts
+          </h2>
+          <div className="mt-8 space-y-5 text-[17px] leading-[1.65] text-muted">
+            <p>
+              Every rule is a public parameter. Amounts, deadlines, decay curves,
+              spending caps — anyone can read them, anyone can audit that the
+              contract did exactly what it said. That is the point of putting
+              conditions on-chain.
+            </p>
+            <p>
+              Identity stays at the edges. KYC hooks and jurisdictional gates
+              belong to the on-ramps and venues that touch fiat — the contract
+              itself sees addresses and signatures, nothing more.
+            </p>
+            <p>
+              Secrets stay secret by construction. A Pod stores only the hash
+              of its key; the preimage that opens it never touches the chain
+              until the moment of opening.
+            </p>
+          </div>
+        </div>
+
+        <div className="md:col-span-7">
+          <motion.div
+            className="overflow-hidden rounded-xl border bg-cream"
+            style={{ borderColor: "var(--hairline)" }}
+            initial={reduced ? false : { opacity: 0, y: 20 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true, margin: "-80px" }}
+            transition={{ duration: 0.6, ease: [1, 0, 0.3, 0.93] }}
+          >
+            <div className="border-b px-6 py-4 text-[12px] font-semibold uppercase tracking-[0.12em] text-muted" style={{ borderColor: "var(--hairline)" }}>
+              What the chain sees
+            </div>
+            <table className="w-full font-mono text-[13px]">
+              <tbody>
+                {ROWS.map(([what, state, note]) => (
+                  <tr key={what} className="ledger-row">
+                    <td className="px-6 py-3.5 text-ink">{what}</td>
+                    <td
+                      className="px-4 py-3.5 text-[11px] font-semibold uppercase tracking-[0.1em]"
+                      style={{ color: state === "visible" ? "#6B7256" : "var(--accent)" }}
+                    >
+                      {state}
+                    </td>
+                    <td className="px-6 py-3.5 text-muted">{note}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </motion.div>
+        </div>
       </div>
     </section>
   );

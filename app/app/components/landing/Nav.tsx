@@ -1,56 +1,66 @@
 "use client";
 
 /**
- * Nav — brand left, center links anchor to sections, right CTA → /app.
- * Fixed; hairline divider appears after the first scroll.
+ * Nav — top bar + floating CTA pill (§3.3: hidden until ~100vh, slides down)
  */
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
-
-const LINKS = [
-  { href: "#how", label: "How it works" },
-  { href: "#templates", label: "Templates" },
-  { href: "#stellar", label: "Why Stellar" },
-];
+import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
+import { ArrowLink } from "../ui";
 
 export default function Nav() {
-  const [scrolled, setScrolled] = useState(false);
+  const [past, setPast] = useState(false);
+  const reduced = useReducedMotion();
+
   useEffect(() => {
-    const on = () => setScrolled(window.scrollY > 8);
+    const on = () => setPast(window.scrollY > window.innerHeight);
     on();
     window.addEventListener("scroll", on, { passive: true });
     return () => window.removeEventListener("scroll", on);
   }, []);
 
   return (
-    <header
-      className={`fixed inset-x-0 top-0 z-40 bg-paper/85 backdrop-blur transition-shadow duration-500 ${
-        scrolled ? "shadow-[0_1px_0_0_#EEE7E0]" : ""
-      }`}
-    >
-      <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
-        <Link href="/" className="font-serif text-xl tracking-tight">
-          Agyion
-        </Link>
-        <nav className="hidden gap-8 md:flex">
-          {LINKS.map((l) => (
-            <a
-              key={l.href}
-              href={l.href}
-              className="text-sm text-muted transition-colors duration-300 hover:text-ink"
-            >
-              {l.label}
-            </a>
-          ))}
-        </nav>
-        <Link
-          href="/app"
-          className="rounded-full bg-ink px-5 py-2 text-sm font-medium text-paper transition-colors duration-300 ease-house hover:bg-accent"
-        >
-          Open the app
-        </Link>
-      </div>
-    </header>
+    <>
+      <header className="fixed inset-x-0 top-0 z-40">
+        <div className="mx-auto flex max-w-[1200px] items-center justify-between px-6 py-5">
+          <a href="/" className="font-serif text-[22px] text-ink">
+            Agyion
+          </a>
+          <nav className="hidden items-center gap-7 text-[14px] font-medium text-ink md:flex">
+            {[
+              ["How it works", "#how"],
+              ["Templates", "#templates"],
+              ["Why Stellar", "#stellar"],
+              ["Compliance", "#compliance"],
+            ].map(([label, href]) => (
+              <a key={href} href={href} className="dup-hover">
+                <span className="dup-a">{label}</span>
+                <span className="dup-b" aria-hidden>
+                  {label}
+                </span>
+              </a>
+            ))}
+          </nav>
+          <ArrowLink href="/app">Open the app</ArrowLink>
+        </div>
+      </header>
+
+      {/* floating CTA pill */}
+      <AnimatePresence>
+        {past && (
+          <motion.a
+            href="/app"
+            className="fixed left-1/2 z-40 rounded-full px-6 py-3 text-[14px] font-semibold"
+            style={{ background: "var(--accent)", color: "#FAF6F3", x: "-50%" }}
+            initial={{ top: -100, opacity: 0 }}
+            animate={{ top: 76, opacity: 1 }}
+            exit={{ top: -100, opacity: 0 }}
+            transition={{ duration: reduced ? 0 : 0.5, ease: [1, 0, 0.3, 0.93] }}
+          >
+            Open the app →
+          </motion.a>
+        )}
+      </AnimatePresence>
+    </>
   );
 }
