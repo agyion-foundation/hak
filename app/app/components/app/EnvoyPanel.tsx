@@ -1,248 +1,638 @@
 "use client";
 
 /**
- * EnvoyPanel — on-chain limited mandate: the owner grants an agent key the
- * right to claim Fade listings FOR the owner, capped per-tx and per-day,
- * revocable in one call. The agent claims with its ed25519 signature;
- * recipient binding is structural (always the owner).
+ * EnvoyPanel — on-chain limited mandate (§5).
+ *
+ * Delegation card shows the agent's limits as concentric rings (per-tx
+ * ceiling, daily cap, expiry). A simulated agent loop watches a Fade's price
+ * and calls envoy_claim when it drops below the threshold; the over-cap
+ * attempt surfaces the contract's rejection — "the contract said no".
+ * Revoke is always one click, never buried.
  */
 
-import { FormEvent, useCallback, useEffect, useState } from "react";
-import { AgyionClient, Fade, Mandate } from "../lib/hakClient";
-import { WalletState } from "../lib/useWallet";
-import { demoAddress } from "../lib/wallet";
-import { formatMinor, formatRemaining, parseMinor, shortAddress } from "../lib/format";
-import { newKeypair, publicKeyHex, signEnvoy } from "../lib/signers";
-import { logEvent } from "../lib/ledgerLog";
-import { CONFIG, IS_MOCK } from "../lib/config";
-import { SECONDS_PER_LEDGER } from "../lib/client";
-import { Badge, DarkPill, DataRow, Field, inputCls } from "../ui";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { motion, useReducedMotion } from "framer-motion";
+import { getClient, mockClient, SECONDS_PER_LEDGER } from "../../lib/client";
+import {
+  AgyionError,
+  AgyionErrorCode,
+  MAX_CLAIMS_PER_MANDATE,
+  priceAtLedger,
+  type Fade,
+  type Mandate,
+} from "../../lib/hakClient";
+import { useLedger } from "../../lib/useLedger";
+import { formatMinor, parseMinor, shortAddress, shortHex } from "../../lib/format";
+import { logEntry } from "../../lib/ledgerLog";
+import { demoAddress } from "../../lib/wallet";
+import { newKeypair, publicKeyHex, signEnvoy } from "../../lib/signers";
+import type { WalletState } from "../../lib/useWallet";
+import { CONFIG, IS_MOCK } from "../../lib/config";
+import { ErrorNote, Eyebrow, Field, FilledButton, GhostButton, OkNote, TextInput } from "../ui";
 
-const AGENT_KEY = "agyion.agentSecret.v1";
+interface AgentEvent {
+  ts: string;
+  kind: "watch" | "claim" | "rejected" | "stopped";
+  note: string;
+}
 
-export default function EnvoyPanel({
-  client,
-  wallet,
-  ledger,
-}: {
-  client: AgyionClient | null;
-  wallet: WalletState;
-  ledger: number | null;
-}) {
-  const me = wallet.address ?? (IS_MOCK ? demoAddress() : null);
+export default function EnvoyPanel({ wallet }: { wallet: WalletState }) {
   const [mandates, setMandates] = useState<Mandate[]>([]);
-  const [fades, setFades] = useState<Fade[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [agentSecret, setAgentSecret] = useState<string | null>(null);
+  const [agentSecret, setAgentSecret] = useState("");
+  const [agentPub, setAgentPub] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
-  // create mandate form
-  const [maxPerTx, setMaxPerTx] = useState("5");
-  const [dailyCap, setDailyCap] = useState("20");
-  const [validFor, setValidFor] = useState("3600");
-
-  useEffect(() => {
-    const s = typeof window !== "undefined" ? window.localStorage.getItem(AGENT_KEY) : null;
-    if (s) setAgentSecret(s);
-  }, []);
+  const client = useMemo(() => {
+    try {
+      return getClient();
+    } catch {
+      return null;
+    }
+  }, [wallet.address]);
+  const ledger = useLedger(client);
 
   const refresh = useCallback(async () => {
-    if (!client) return;
-    try {
-      setMandates(await client.listMandates());
-      setFades(await client.listFades());
-    } catch {
-      /* mock-only listing */
-    }
-  }, [client]);
-
+    if (IS_MOCK) setMandates((await mockClient()?.listMandates()) ?? []);
+  }, []);
   useEffect(() => {
     void refresh();
-  }, [refresh, ledger]);
+  }, [refresh, wallet.address]);
 
-  function ensureAgent(): string {
-    if (agentSecret) return agentSecret;
-    const kp = newKeypair();
-    window.localStorage.setItem(AGENT_KEY, kp.secret);
-    setAgentSecret(kp.secret);
-    logEvent("info", "envoy", `agent keypair minted — pubkey ${kp.pubkeyHex.slice(0, 12)}…`);
-    return kp.secret;
-  }
-
-  async function create(e: FormEvent) {
-    e.preventDefault();
-    if (!client || !me) return;
-    setBusy(true);
-    setErr(null);
+  useEffect(() => {
     try {
-      const secret = ensureAgent();
-      const validUntil =
-        (ledger ?? (await client.currentLedger())) +
-        Math.ceil(Number(validFor) / SECONDS_PER_LEDGER);
+      const s = window.sessionStorage.getItem("agyion.agentSecret");
+      if (s) {
+        setAgentSecret(s);
+        setAgentPub(publicKeyHex(s));
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const generateAgent = () => {
+    const k = newKeypair();
+    setAgentSecret(k.secret);
+    setAgentPub(k.pubkeyHex);
+    try {
+      window.sessionStorage.setItem("agyion.agentSecret", k.secret);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  return (
+    <div className="space-y-10">
+      <header>
+        <Eyebrow>Envoy · agent mandate</Eyebrow>
+        <h1 className="display mt-2 text-[34px] text-ink md:text-[44px]">
+          Delegate spending, not trust
+        </h1>
+        <p className="mt-3 max-w-[64ch] text-[16px] leading-[1.65] text-muted">
+          Grant an agent key a bounded right to claim Fade listings for you:
+          a per-transaction ceiling, a daily cap, an expiry. The contract
+          enforces every limit — the agent never touches anything else.
+        </p>
+      </header>
+
+      <div className="grid grid-cols-1 gap-10 lg:grid-cols-12">
+        <div className="lg:col-span-5">
+          <CreateMandate
+            wallet={wallet}
+            agentPub={agentPub}
+            generateAgent={generateAgent}
+            onCreated={() => void refresh()}
+            setError={setError}
+            setNotice={setNotice}
+          />
+        </div>
+        <div className="space-y-8 lg:col-span-7">
+          {!IS_MOCK && (
+            <LoadMandate onLoaded={(m) => setMandates((cur) => [m, ...cur.filter((x) => x.id !== m.id)])} />
+          )}
+          {mandates.length === 0 && (
+            <p className="rounded-xl border p-6 text-[14px] text-muted" style={{ borderColor: "var(--hairline)" }}>
+              No mandates yet. Grant one on the left — the limit rings will draw here.
+            </p>
+          )}
+          {mandates.map((m) => (
+            <MandateCard
+              key={m.id.toString()}
+              mandate={m}
+              ledger={ledger}
+              agentSecret={agentSecret}
+              onChanged={() => void refresh()}
+              setError={setError}
+              setNotice={setNotice}
+            />
+          ))}
+        </div>
+      </div>
+
+      {error && <ErrorNote>{error}</ErrorNote>}
+      {notice && <OkNote>{notice}</OkNote>}
+    </div>
+  );
+}
+
+function CreateMandate({
+  wallet,
+  agentPub,
+  generateAgent,
+  onCreated,
+  setError,
+  setNotice,
+}: {
+  wallet: WalletState;
+  agentPub: string;
+  generateAgent: () => void;
+  onCreated: () => void;
+  setError: (e: string | null) => void;
+  setNotice: (n: string | null) => void;
+}) {
+  const [maxPerTx, setMaxPerTx] = useState("200");
+  const [dailyCap, setDailyCap] = useState("500");
+  const [minutes, setMinutes] = useState("15");
+  const [busy, setBusy] = useState(false);
+
+  const create = async () => {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      if (!agentPub) throw new Error("Generate an agent key first");
+      const client = getClient();
+      const now = await client.currentLedger();
+      const validUntil = now + Math.max(20, Math.round((Number(minutes) * 60) / SECONDS_PER_LEDGER));
+      const owner = wallet.address ?? demoAddress();
       const id = await client.create_mandate(
-        me,
-        publicKeyHex(secret),
+        owner,
+        agentPub,
         parseMinor(maxPerTx),
         parseMinor(dailyCap),
         validUntil,
       );
-      logEvent(
-        "mandate",
-        "envoy",
-        `mandate #${id} — ≤${maxPerTx}/tx, ≤${dailyCap}/day, until ledger ${validUntil}`,
-      );
-      await refresh();
-    } catch (e2) {
-      const msg = e2 instanceof Error ? e2.message : String(e2);
-      setErr(msg);
-      logEvent("error", "envoy", `mandate failed: ${msg}`);
+      logEntry({
+        ledger: now,
+        template: "envoy",
+        action: "create_mandate",
+        refId: id.toString(),
+        amount: parseMinor(dailyCap).toString(),
+        status: "locked",
+        detail: `agent ${shortHex(agentPub)} · ${maxPerTx}/tx · ${dailyCap}/day · until ledger ${validUntil}`,
+        txHash: null,
+      });
+      setNotice(`Mandate #${id} granted. The agent can act until ledger ${validUntil}.`);
+      onCreated();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
-  }
-
-  async function agentClaim(m: Mandate, f: Fade) {
-    if (!client) return;
-    setBusy(true);
-    setErr(null);
-    try {
-      if (!agentSecret) throw new Error("No agent key — create a mandate first (the demo mints one)");
-      const ts = BigInt(Math.floor(Date.now() / 1000));
-      const sig = signEnvoy(agentSecret, m.id, f.id, ts);
-      await client.envoy_claim(m.id, f.id, ts, sig);
-      logEvent(
-        "envoy",
-        "envoy",
-        `agent claimed fade #${f.id} for ${shortAddress(m.owner)} (mandate #${m.id})`,
-      );
-      await refresh();
-    } catch (e2) {
-      const msg = e2 instanceof Error ? e2.message : String(e2);
-      setErr(msg);
-      logEvent("error", "envoy", `agent claim failed: ${msg}`);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function revoke(m: Mandate) {
-    if (!client || !me) return;
-    setBusy(true);
-    setErr(null);
-    try {
-      await client.revoke_mandate(me, m.id);
-      logEvent("revoke", "envoy", `mandate #${m.id} revoked`);
-      await refresh();
-    } catch (e2) {
-      const msg = e2 instanceof Error ? e2.message : String(e2);
-      setErr(msg);
-      logEvent("error", "envoy", `revoke failed: ${msg}`);
-    } finally {
-      setBusy(false);
-    }
-  }
+  };
 
   return (
-    <section>
-      <h2 className="mb-2 font-serif text-3xl">Envoy</h2>
-      <p className="mb-8 max-w-xl text-sm leading-relaxed text-muted">
-        Give an agent a limited mandate: it may claim Fade deals for you,
-        capped per transaction and per day. Revocation is one call and takes
-        effect immediately. Claims land on you — the agent can never redirect
-        them.
-      </p>
-
-      <form onSubmit={create} className="mb-10 grid max-w-lg gap-4 rounded-2xl border border-hairline bg-cream p-6">
-        <Field label="max per claim">
-          <input className={inputCls} value={maxPerTx} onChange={(e) => setMaxPerTx(e.target.value)} />
+    <div className="rounded-xl border bg-cream p-6" style={{ borderColor: "var(--hairline)" }}>
+      <h2 className="display text-[24px] text-ink">Grant a mandate</h2>
+      <div className="mt-5 space-y-4">
+        <Field label="Agent key (hex pubkey)" hint="The agent signs claims; the recipient is fixed to you">
+          <div className="flex gap-2">
+            <TextInput value={agentPub} readOnly className="font-mono text-[12px]" placeholder="generate →" />
+            <GhostButton onClick={generateAgent}>{agentPub ? "Regenerate" : "Generate agent key"}</GhostButton>
+          </div>
         </Field>
-        <Field label="daily cap">
-          <input className={inputCls} value={dailyCap} onChange={(e) => setDailyCap(e.target.value)} />
-        </Field>
-        <Field label="valid for (seconds)">
-          <input className={inputCls} value={validFor} onChange={(e) => setValidFor(e.target.value)} />
-        </Field>
-        <div>
-          <DarkPill variant="accent" type="submit" disabled={busy || !client}>
-            {busy ? "Granting…" : "Grant the mandate"}
-          </DarkPill>
+        <div className="grid grid-cols-2 gap-4">
+          <Field label={`Max per tx (${CONFIG.assetCode})`}>
+            <TextInput value={maxPerTx} onChange={(e) => setMaxPerTx(e.target.value)} inputMode="decimal" />
+          </Field>
+          <Field label={`Daily cap (${CONFIG.assetCode})`}>
+            <TextInput value={dailyCap} onChange={(e) => setDailyCap(e.target.value)} inputMode="decimal" />
+          </Field>
         </div>
-      </form>
+        <Field label="Valid for (minutes)" hint="Converted to an expiry ledger">
+          <TextInput value={minutes} onChange={(e) => setMinutes(e.target.value)} inputMode="numeric" />
+        </Field>
+      </div>
+      <div className="mt-5">
+        <FilledButton onClick={() => void create()} disabled={busy}>
+          {busy ? "Granting…" : "Grant mandate"}
+        </FilledButton>
+      </div>
+    </div>
+  );
+}
 
-      {err && <p className="mb-6 font-mono text-xs text-ember">{err}</p>}
+function LoadMandate({ onLoaded }: { onLoaded: (m: Mandate) => void }) {
+  const [id, setId] = useState("");
+  return (
+    <div className="flex items-end gap-2">
+      <Field label="Load mandate by id">
+        <TextInput value={id} onChange={(e) => setId(e.target.value)} inputMode="numeric" className="w-[160px]" />
+      </Field>
+      <GhostButton
+        onClick={() =>
+          void getClient()
+            .get_mandate(BigInt(id.trim()))
+            .then((m) => m && onLoaded(m))
+        }
+      >
+        Load
+      </GhostButton>
+    </div>
+  );
+}
 
-      <div className="grid gap-4">
-        {mandates.length === 0 && (
-          <p className="text-sm text-muted">No mandates yet. Grant one above.</p>
-        )}
-        {mandates.map((m) => {
-          const expired = ledger !== null && ledger > m.valid_until;
-          const remaining =
-            ledger !== null ? Math.max(0, (m.valid_until - ledger) * SECONDS_PER_LEDGER) : 0;
-          const openFades = fades.filter((f) => f.state === 0);
-          return (
-            <div key={m.id.toString()} className="rounded-2xl border border-hairline bg-paper p-5">
-              <div className="mb-3 flex items-center justify-between">
-                <span className="font-serif text-lg">Mandate #{m.id.toString()}</span>
-                {m.revoked ? (
-                  <Badge tone="returned">revoked</Badge>
-                ) : expired ? (
-                  <Badge tone="returned">expired</Badge>
-                ) : (
-                  <Badge tone="live">active</Badge>
-                )}
+function MandateCard({
+  mandate,
+  ledger,
+  agentSecret,
+  onChanged,
+  setError,
+  setNotice,
+}: {
+  mandate: Mandate;
+  ledger: number | null;
+  agentSecret: string;
+  onChanged: () => void;
+  setError: (e: string | null) => void;
+  setNotice: (n: string | null) => void;
+}) {
+  const [running, setRunning] = useState(false);
+  const [threshold, setThreshold] = useState("170");
+  const [fadeId, setFadeId] = useState("");
+  const [events, setEvents] = useState<AgentEvent[]>([]);
+  const [liveFade, setLiveFade] = useState<Fade | null>(null);
+  const [busy, setBusy] = useState(false);
+  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const expired = ledger != null && ledger > mandate.valid_until;
+  const usedPct = mandate.daily_cap > 0n ? Number((mandate.daily_used * 100n) / mandate.daily_cap) : 0;
+
+  // the agent loop reads the freshest ledger through a ref (interval closures)
+  const ledgerRef = useRef(ledger);
+  ledgerRef.current = ledger;
+  const thresholdRef = useRef(threshold);
+  thresholdRef.current = threshold;
+
+  const push = (e: AgentEvent) => setEvents((cur) => [e, ...cur].slice(0, 14));
+
+  const stop = useCallback(() => {
+    if (timer.current) clearInterval(timer.current);
+    timer.current = null;
+    setRunning(false);
+  }, []);
+
+  useEffect(() => stop, [stop]);
+
+  /** Find the fade the agent watches: explicit id, else the latest open one */
+  const resolveFade = useCallback(async (): Promise<Fade | null> => {
+    const client = getClient();
+    if (fadeId.trim()) return client.get_fade(BigInt(fadeId.trim()));
+    if (IS_MOCK) {
+      const fades = (await mockClient()?.listFades()) ?? [];
+      return fades.filter((f) => f.state === 0).pop() ?? null;
+    }
+    return null;
+  }, [fadeId]);
+
+  const attemptClaim = useCallback(
+    async (kind: "auto" | "breach") => {
+      const client = getClient();
+      const fade = await resolveFade();
+      if (!fade) {
+        push({ ts: now(), kind: "watch", note: "no open fade to watch" });
+        return;
+      }
+      setLiveFade(fade);
+      const cur = ledgerRef.current;
+      if (cur == null) return;
+      const price = priceAtLedger(fade, cur);
+      const thresholdMinor = parseMinor(thresholdRef.current);
+
+      if (kind === "auto" && price > thresholdMinor) {
+        push({
+          ts: now(),
+          kind: "watch",
+          note: `fade #${fade.id} at ${formatMinor(price)} — above ${formatMinor(thresholdMinor)}, waiting`,
+        });
+        return;
+      }
+      if (!agentSecret) {
+        push({ ts: now(), kind: "stopped", note: "no agent key in this tab" });
+        stop();
+        return;
+      }
+      try {
+        const ts = BigInt(Math.floor(Date.now() / 1000));
+        const sig = signEnvoy(agentSecret, mandate.id, fade.id, ts);
+        await client.envoy_claim(mandate.id, fade.id, ts, sig);
+        push({
+          ts: now(),
+          kind: "claim",
+          note: `claimed fade #${fade.id} at ${formatMinor(price)} ${CONFIG.assetCode} for the owner`,
+        });
+        logEntry({
+          ledger: cur,
+          template: "envoy",
+          action: "envoy_claim",
+          refId: `${mandate.id}→${fade.id}`,
+          amount: price.toString(),
+          status: "executed",
+          detail: `agent claimed fade #${fade.id} at ${formatMinor(price)} within mandate`,
+          txHash: null,
+        });
+        stop();
+        onChanged();
+      } catch (e) {
+        const cap =
+          e instanceof AgyionError &&
+          (e.code === AgyionErrorCode.CapExceeded || e.code === AgyionErrorCode.MandateExpired);
+        push({
+          ts: now(),
+          kind: "rejected",
+          note: cap
+            ? `${e.message}`
+            : `rejected: ${e instanceof Error ? e.message : String(e)}`,
+        });
+        logEntry({
+          ledger: cur,
+          template: "envoy",
+          action: "envoy_claim",
+          refId: `${mandate.id}→${fade.id}`,
+          amount: price.toString(),
+          status: "rejected",
+          detail: e instanceof Error ? e.message : String(e),
+          txHash: null,
+        });
+        if (kind === "auto") stop();
+      }
+    },
+    [agentSecret, mandate.id, onChanged, resolveFade, stop],
+  );
+
+  const start = () => {
+    setRunning(true);
+    push({ ts: now(), kind: "watch", note: `agent loop started — threshold ${threshold} ${CONFIG.assetCode}` });
+    timer.current = setInterval(() => void attemptClaim("auto"), 2_000);
+    void attemptClaim("auto");
+  };
+
+  const breach = () => void attemptClaim("breach");
+
+  /** Mock demo: a fade priced at 90% of max_per_tx — inside the cap, above the default threshold */
+  const demoFade = async () => {
+    const m = mockClient();
+    if (!m) return;
+    setError(null);
+    try {
+      const nowL = await m.currentLedger();
+      const start = (mandate.max_per_tx * 9n) / 10n;
+      const floor = -parseMinor("40");
+      const duration = 300;
+      const id = await m.create_fade(
+        mandate.owner,
+        CONFIG.assetAddress || CONFIG.assetCode,
+        parseMinor("1000"),
+        start,
+        floor,
+        start - floor,
+        BigInt(duration),
+        duration,
+        120,
+        m.venuePubkey(),
+      );
+      logEntry({
+        ledger: nowL,
+        template: "fade",
+        action: "create_fade",
+        refId: id.toString(),
+        amount: parseMinor("1000").toString(),
+        status: "locked",
+        detail: `demo fade for the agent — starts at ${formatMinor(start)} ${CONFIG.assetCode} (90% of the cap)`,
+        txHash: null,
+      });
+      push({ ts: now(), kind: "watch", note: `demo fade #${id} listed at ${formatMinor(start)} — decaying toward the threshold` });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const revoke = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      stop();
+      await getClient().revoke_mandate(mandate.owner, mandate.id);
+      logEntry({
+        ledger,
+        template: "envoy",
+        action: "revoke_mandate",
+        refId: mandate.id.toString(),
+        amount: null,
+        status: "returned",
+        detail: "mandate revoked by owner — instant",
+        txHash: null,
+      });
+      setNotice(`Mandate #${mandate.id} revoked. The agent key is now inert.`);
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const lastRejected = events.find((e) => e.kind === "rejected");
+
+  return (
+    <div className="overflow-hidden rounded-xl border bg-cream" style={{ borderColor: "var(--hairline)" }}>
+      <div className="grid grid-cols-1 md:grid-cols-12">
+        {/* limit rings */}
+        <div className="flex items-center justify-center p-6 md:col-span-5">
+          <LimitRings
+            usedPct={usedPct}
+            revoked={mandate.revoked}
+            expired={expired}
+            running={running}
+            rejected={!!lastRejected}
+          />
+        </div>
+
+        {/* data + controls */}
+        <div className="p-6 md:col-span-7">
+          <div className="flex items-baseline justify-between gap-3">
+            <h3 className="display text-[22px] text-ink">Mandate #{mandate.id.toString()}</h3>
+            <span
+              className="text-[11px] font-semibold uppercase tracking-[0.12em]"
+              style={{
+                color: mandate.revoked ? "var(--muted)" : expired ? "#8F4E2A" : "var(--accent)",
+              }}
+            >
+              {mandate.revoked ? "revoked" : expired ? "expired" : "active"}
+            </span>
+          </div>
+          <div className="mt-4 space-y-2 font-mono text-[13px]">
+            <Row k="owner" v={shortAddress(mandate.owner)} />
+            <Row k="agent" v={shortHex(mandate.agent_pubkey)} />
+            <Row k="max / tx" v={`${formatMinor(mandate.max_per_tx)} ${CONFIG.assetCode}`} />
+            <Row
+              k="daily used"
+              v={`${formatMinor(mandate.daily_used)} / ${formatMinor(mandate.daily_cap)} ${CONFIG.assetCode}`}
+            />
+            {/* claim-count cap (audit v2 fix): the active bound — monetary caps are dead under price<=0 */}
+            <Row k="claims" v={`${mandate.claims_used} / ${MAX_CLAIMS_PER_MANDATE}`} />
+            <Row k="valid until" v={`ledger ${mandate.valid_until}`} />
+          </div>
+
+          {!mandate.revoked && !expired && (
+            <div className="mt-5 space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <Field label={`Claim threshold (${CONFIG.assetCode})`}>
+                  <TextInput value={threshold} onChange={(e) => setThreshold(e.target.value)} inputMode="decimal" />
+                </Field>
+                <Field label="Fade id (blank = latest open)">
+                  <TextInput value={fadeId} onChange={(e) => setFadeId(e.target.value)} inputMode="numeric" />
+                </Field>
               </div>
-              <DataRow k="owner" v={shortAddress(m.owner)} />
-              <DataRow k="agent" v={`${m.agent_pubkey.slice(0, 12)}…`} />
-              <DataRow k="per-tx cap" v={`${formatMinor(m.max_per_tx)} ${CONFIG.symbol}`} />
-              <DataRow
-                k="daily"
-                v={`${formatMinor(m.daily_used)} / ${formatMinor(m.daily_cap)} ${CONFIG.symbol}`}
-              />
-              <DataRow
-                k="valid until"
-                v={
-                  expired
-                    ? `ledger ${m.valid_until} · expired`
-                    : `ledger ${m.valid_until} · ${formatRemaining(remaining)} left`
-                }
-              />
-              {!m.revoked && !expired && (
-                <div className="mt-4 space-y-2">
-                  {openFades.length === 0 ? (
-                    <p className="font-mono text-xs text-muted">
-                      no open fades for the agent to hunt
-                    </p>
-                  ) : (
-                    openFades.map((f) => (
-                      <div
-                        key={f.id.toString()}
-                        className="flex items-center justify-between rounded-lg border border-hairline bg-cream px-3 py-2"
-                      >
-                        <span className="font-mono text-xs">
-                          fade #{f.id.toString()}
-                        </span>
-                        <DarkPill
-                          variant="ghost"
-                          onClick={() => void agentClaim(m, f)}
-                          disabled={busy || !client}
-                        >
-                          agent claim
-                        </DarkPill>
-                      </div>
-                    ))
-                  )}
-                  <div>
-                    <DarkPill variant="ember" onClick={() => void revoke(m)} disabled={busy || !client}>
-                      Revoke now
-                    </DarkPill>
-                  </div>
+              {liveFade && ledger != null && (
+                <div className="tnum font-mono text-[12px] text-muted">
+                  watching fade #{liveFade.id.toString()} · price {formatMinor(priceAtLedger(liveFade, ledger))}{" "}
+                  {CONFIG.assetCode}
                 </div>
               )}
+              <div className="flex flex-wrap gap-3">
+                {running ? (
+                  <GhostButton onClick={stop}>Stop agent</GhostButton>
+                ) : (
+                  <FilledButton onClick={start}>Run the agent</FilledButton>
+                )}
+                <GhostButton onClick={breach}>Attempt over-cap claim</GhostButton>
+                <GhostButton onClick={() => void revoke()} disabled={busy}>
+                  {busy ? "Revoking…" : "Revoke"}
+                </GhostButton>
+              </div>
+              {IS_MOCK && (
+                <button
+                  type="button"
+                  onClick={() => void demoFade()}
+                  className="text-[13px] font-medium text-muted underline underline-offset-4"
+                >
+                  need a target? list a demo fade just under the cap
+                </button>
+              )}
             </div>
-          );
-        })}
+          )}
+          {(mandate.revoked || expired) && (
+            <p className="mt-4 text-[13px] text-muted">
+              This mandate is inert — the contract rejects any claim signed by the agent key.
+            </p>
+          )}
+        </div>
       </div>
-    </section>
+
+      {/* agent feed */}
+      {events.length > 0 && (
+        <div className="border-t px-6 py-4" style={{ borderColor: "var(--hairline)" }}>
+          <ul className="space-y-1.5">
+            {events.map((e, i) => (
+              <li key={i} className="flex items-baseline gap-3 font-mono text-[12px]">
+                <span className="tnum text-muted">{e.ts}</span>
+                <span
+                  className="font-semibold uppercase tracking-[0.08em]"
+                  style={{
+                    color:
+                      e.kind === "claim"
+                        ? "#6B7256"
+                        : e.kind === "rejected"
+                          ? "#8F4E2A"
+                          : "var(--muted)",
+                  }}
+                >
+                  {e.kind}
+                </span>
+                <span className="text-ink">{e.note}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function now(): string {
+  return new Date().toISOString().slice(11, 19);
+}
+
+/** Concentric limit rings: daily cap fill, agent dot orbit, cap-wall pulse */
+function LimitRings({
+  usedPct,
+  revoked,
+  expired,
+  running,
+  rejected,
+}: {
+  usedPct: number;
+  revoked: boolean;
+  expired: boolean;
+  running: boolean;
+  rejected: boolean;
+}) {
+  const reduced = useReducedMotion();
+  const [angle, setAngle] = useState(0);
+  useEffect(() => {
+    if (!running || reduced) return;
+    const id = setInterval(() => setAngle((a) => a + 0.12), 120);
+    return () => clearInterval(id);
+  }, [running, reduced]);
+
+  const dim = revoked || expired;
+  const dotColor = rejected ? "#8F4E2A" : dim ? "var(--muted)" : "var(--accent)";
+  const cx = 90 + Math.cos(angle) * 46;
+  const cy = 90 + Math.sin(angle) * 46;
+
+  return (
+    <svg viewBox="0 0 180 180" className="h-[180px] w-[180px]">
+      {/* daily cap ring — fills with use */}
+      <circle cx="90" cy="90" r="64" fill="none" stroke="var(--sand)" strokeWidth="2" />
+      <motion.circle
+        cx="90" cy="90" r="64" fill="none"
+        stroke={usedPct >= 100 ? "#8F4E2A" : "var(--accent)"}
+        strokeWidth="3"
+        strokeLinecap="round"
+        strokeDasharray={2 * Math.PI * 64}
+        animate={{ strokeDashoffset: 2 * Math.PI * 64 * (1 - Math.min(1, usedPct / 100)) }}
+        transition={{ duration: reduced ? 0 : 0.5, ease: [1, 0, 0.3, 0.93] }}
+        transform="rotate(-90 90 90)"
+      />
+      {/* per-tx ceiling ring */}
+      <circle cx="90" cy="90" r="46" fill="none" stroke="var(--sand)" strokeWidth="1.2" strokeDasharray="3 5" />
+      {/* expiry ring */}
+      <circle cx="90" cy="90" r="28" fill="none" stroke={dim ? "var(--hairline)" : "var(--sand)"} strokeWidth="1" />
+      {/* owner at the center */}
+      <circle cx="90" cy="90" r="3" fill="var(--ink)" />
+      {/* the agent dot — stops at the wall when rejected */}
+      <circle cx={rejected ? 90 + 46 : cx} cy={rejected ? 90 : cy} r="4.5" fill={dotColor} />
+      {rejected && !reduced && (
+        <motion.circle
+          cx={90 + 46} cy={90} r="10" fill="none" stroke="#8F4E2A" strokeWidth="1.2"
+          animate={{ r: [10, 16, 10], opacity: [0.7, 0.15, 0.7] }}
+          transition={{ duration: 1.6, repeat: Infinity }}
+        />
+      )}
+      <text x="90" y="170" textAnchor="middle" fontSize="9.5" fill="var(--muted)" fontFamily="var(--font-mono)">
+        {revoked ? "revoked" : expired ? "expired" : `${usedPct}% of daily cap`}
+      </text>
+    </svg>
+  );
+}
+
+function Row({ k, v }: { k: string; v: string }) {
+  return (
+    <div className="flex justify-between gap-4 border-b pb-1.5" style={{ borderColor: "var(--hairline)" }}>
+      <span className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted">{k}</span>
+      <span className="tnum text-ink">{v}</span>
+    </div>
   );
 }
