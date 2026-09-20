@@ -2,7 +2,7 @@
 
 ## Verified green (verifier/runs/)
 - Contracts: 4 templates (Fade, Pod, Trigger, Envoy) · `cargo test` **30/30 PASS** · security audit done, 4 fixes applied (refund overflow, Envoy claim cap, Trigger deadline, TTL)
-- Frontend: English, animated (scroll-scrub hero, lifeline, per-template motion) · `npm run build` exit 0, static export in `app/out/` · Playwright E2E pass (mock mode)
+- Frontend: English, v3 motion system — zero scroll-linked animation (no useScroll/scrub anywhere); hero is a deterministic looping code-drawn lifecycle scene (capsule + decay curve + ticking price), template cards use entrance stagger + hover layer-shift + always-on micro-motion loops, lifeline self-draws on its own clock · `npm run build` exit 0, static export in `app/out/` · Playwright visual QA pass (desktop + mobile + reduced-motion)
 - GitHub `agyion-foundation/hak`: **77/77 text files blob-sha verified** (sweep complete)
 - Cloudflare Worker `agyion`: deployed (API 200) · 107 assets uploaded · workers.dev subdomain enabled → `agyion.jasurbek-rustamov.workers.dev`
 - Docs: README.md, docs/PITCH.md (15 slides + speaker notes), docs/DEMO_SCRIPT.md, docs/LIMITATIONS.md — all English

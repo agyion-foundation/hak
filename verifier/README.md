@@ -11,3 +11,11 @@ Checks:
 6. Cloudflare Pages live URL returns HTTP 200
 7. Skill citations listed in README (handbook requirement)
 Runs logged under verifier/runs/ (timestamped, command + exit code + key values).
+
+## v2 (2026-09-20) — site redesign + template pitch + video fix
+Differs from v1: adds UX/motion rules and official-template compliance.
+Checks:
+8. No scroll-linked animation: grep app/ for useScroll/scrollYProgress/scrub → must be empty
+9. Hero video physics: hero-loop replaced or fixed (no sand overflow) — verified by frame extraction
+10. docs/PITCH.md follows official template order: The Solution → PMF → Technical Workflow → The Team
+11. cargo test + npm build still green (regression)
