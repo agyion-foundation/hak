@@ -2,7 +2,7 @@
 name = "hak"
 version = "0.1.0"
 edition = "2021"
-description = "HAK MVP — Son Saat + Kapsul kernel kontrati (SPEC.md §3)"
+description = "Agyion kernel contract — Fade + Pod + Trigger + Envoy templates (SPEC_V2)"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
