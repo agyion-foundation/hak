@@ -165,6 +165,50 @@ a:focus-visible {
   transform: translateX(2px);
 }
 
+/* Template cards — hover layer shift (v3, replaces scroll parallax) */
+.template-card {
+  transition: border-color 300ms ease;
+}
+.template-card:hover {
+  border-color: var(--sand);
+}
+.template-card .layer-media,
+.template-card .layer-chip {
+  transition: transform 500ms cubic-bezier(1, 0, 0.3, 0.93);
+}
+.template-card:hover .layer-media {
+  transform: translate(8px, -6px) scale(1.02);
+}
+.template-card:hover .layer-chip {
+  transform: translate(-6px, -8px);
+}
+@media (prefers-reduced-motion: reduce) {
+  .template-card .layer-media,
+  .template-card .layer-chip {
+    transition: none;
+    transform: none !important;
+  }
+}
+
+/* Soft pulse for the active stage label (How it works) */
+@keyframes stage-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.stage-dot {
+  animation: stage-pulse 1.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .stage-dot {
+    animation: none;
+  }
+}
+
 /* Slow footer strip (the only marquee allowed — §4.6) */
 @keyframes strip-scroll {
   from {

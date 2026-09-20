@@ -21,7 +21,10 @@ export default function Nav() {
 
   return (
     <>
-      <header className="fixed inset-x-0 top-0 z-40">
+      <header
+        className="fixed inset-x-0 top-0 z-40 border-b backdrop-blur-sm"
+        style={{ borderColor: "var(--hairline)", background: "rgba(250,246,243,0.82)" }}
+      >
         <div className="mx-auto flex max-w-[1200px] items-center justify-between px-6 py-5">
           <a href="/" className="font-serif text-[22px] text-ink">
             Agyion

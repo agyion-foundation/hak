@@ -1,11 +1,20 @@
 "use client";
 
 /**
- * WhyStellar — dark ink interlude (§4.4). Day→night fade in and out,
- * numbers in mono, one oversized serif stat. Sand lifeline passes through.
+ * WhyStellar — dark ink interlude (§4.4). v3: no scroll scrub — the big
+ * stat counts up on entrance, a mono ledger ticker increments on Stellar's
+ * ~5s rhythm, and the sand wire carries a slow traveling pulse.
  */
 
-import { motion, useReducedMotion } from "framer-motion";
+import { useEffect, useRef, useState } from "react";
+import {
+  motion,
+  useInView,
+  useMotionValue,
+  useMotionValueEvent,
+  useReducedMotion,
+  animate,
+} from "framer-motion";
 import { Eyebrow } from "../ui";
 
 const STATS = [
@@ -16,8 +25,38 @@ const STATS = [
 
 export default function WhyStellar() {
   const reduced = useReducedMotion();
+  const root = useRef<HTMLElement>(null);
+  const inView = useInView(root, { margin: "-25% 0px -25% 0px" });
+
+  // The oversized stat counts up on entrance, then breathes +1 per "ledger"
+  const count = useMotionValue(0);
+  const [finality, setFinality] = useState(0);
+  useMotionValueEvent(count, "change", (v) =>
+    setFinality((prev) => {
+      const n = Math.round(v * 10) / 10;
+      return prev === n ? prev : n;
+    }),
+  );
+  useEffect(() => {
+    if (!inView) return;
+    if (reduced) {
+      setFinality(5);
+      return;
+    }
+    const c = animate(count, 5, { duration: 1.6, ease: [1, 0, 0.3, 0.93] });
+    return c.stop;
+  }, [inView, reduced, count]);
+
+  // Live ledger ticker — increments every 5s while the section is on screen
+  const [ledger, setLedger] = useState(582_341);
+  useEffect(() => {
+    if (!inView || reduced) return;
+    const id = setInterval(() => setLedger((l) => l + 1), 5000);
+    return () => clearInterval(id);
+  }, [inView, reduced]);
+
   return (
-    <section id="stellar" className="relative" style={{ background: "#211D1A" }}>
+    <section id="stellar" ref={root} className="relative" style={{ background: "#211D1A" }}>
       {/* gradient wipe in (day → night) */}
       <div className="h-24" style={{ background: "linear-gradient(180deg, #FAF6F3, #211D1A)" }} />
 
@@ -34,11 +73,21 @@ export default function WhyStellar() {
           Conditions need a ledger that is fast, cheap, and final.
         </motion.h2>
 
-        <div className="mt-10 font-serif text-[72px] leading-none md:text-[120px]" style={{ color: "#CF8850" }}>
-          <span className="tnum">5</span>
-          <span className="text-[28px] md:text-[40px]" style={{ color: "#8E857E" }}>
-            {" "}seconds to certainty
-          </span>
+        <div className="mt-10 flex flex-wrap items-end gap-x-6 gap-y-3">
+          <div className="font-serif text-[72px] leading-none md:text-[120px]" style={{ color: "#CF8850" }}>
+            <span className="tnum">{finality}</span>
+            <span className="text-[28px] md:text-[40px]" style={{ color: "#8E857E" }}>
+              {" "}seconds to certainty
+            </span>
+          </div>
+          {/* live ledger tick — the chain breathing in real time */}
+          <div className="flex items-center gap-2 pb-3 font-mono text-[12px]" style={{ color: "#8E857E" }}>
+            <span
+              className={`inline-block h-1.5 w-1.5 rounded-full ${reduced ? "" : "stage-dot"}`}
+              style={{ background: "#CF8850" }}
+            />
+            ledger <span className="tnum" style={{ color: "#F3ECE4" }}>#{ledger.toLocaleString("en-US")}</span> closed
+          </div>
         </div>
 
         <div className="mt-16 grid grid-cols-1 gap-px overflow-hidden rounded-xl md:grid-cols-3" style={{ background: "#3A332D" }}>
@@ -62,7 +111,8 @@ export default function WhyStellar() {
           ))}
         </div>
 
-        {/* lifeline passes through, warming the section */}
+        {/* lifeline passes through, warming the section — draws in on
+            entrance, then carries a slow traveling pulse forever */}
         <svg viewBox="0 0 1200 60" className="mt-20 w-full" aria-hidden>
           <motion.path
             d="M 0 40 C 200 10, 400 55, 600 30 C 800 8, 1000 50, 1200 24"
@@ -74,6 +124,21 @@ export default function WhyStellar() {
             viewport={{ once: true }}
             transition={{ duration: 1.4, ease: [1, 0, 0.3, 0.93] }}
           />
+          {!reduced && (
+            <motion.path
+              d="M 0 40 C 200 10, 400 55, 600 30 C 800 8, 1000 50, 1200 24"
+              stroke="#CF8850"
+              strokeWidth="1.5"
+              fill="none"
+              strokeLinecap="round"
+              pathLength={1}
+              strokeDasharray="0.03 0.12"
+              initial={{ strokeDashoffset: 1 }}
+              animate={{ strokeDashoffset: 0 }}
+              transition={{ duration: 6, ease: "linear", repeat: Infinity }}
+              opacity={0.6}
+            />
+          )}
         </svg>
       </div>
 

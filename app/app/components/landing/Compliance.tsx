@@ -61,8 +61,15 @@ export default function Compliance() {
             </div>
             <table className="w-full font-mono text-[13px]">
               <tbody>
-                {ROWS.map(([what, state, note]) => (
-                  <tr key={what} className="ledger-row">
+                {ROWS.map(([what, state, note], i) => (
+                  <motion.tr
+                    key={what}
+                    className="ledger-row"
+                    initial={reduced ? false : { opacity: 0, x: -8 }}
+                    whileInView={{ opacity: 1, x: 0 }}
+                    viewport={{ once: true, margin: "-40px" }}
+                    transition={{ duration: 0.45, delay: 0.15 + i * 0.07, ease: [1, 0, 0.3, 0.93] }}
+                  >
                     <td className="px-6 py-3.5 text-ink">{what}</td>
                     <td
                       className="px-4 py-3.5 text-[11px] font-semibold uppercase tracking-[0.1em]"
@@ -71,7 +78,7 @@ export default function Compliance() {
                       {state}
                     </td>
                     <td className="px-6 py-3.5 text-muted">{note}</td>
-                  </tr>
+                  </motion.tr>
                 ))}
               </tbody>
             </table>

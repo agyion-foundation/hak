@@ -1,18 +1,17 @@
 "use client";
 
 /**
- * Lifeline — one continuous pale-sand stroke flowing down the page margin,
- * drawn via pathLength mapped to global scroll (§3.2). The "wire" the money
- * travels. Desktop only.
+ * Lifeline — one continuous pale-sand stroke flowing down the page margin
+ * (the "wire" the money travels). v3: no scroll linkage — the wire draws
+ * itself on its own clock: a slow self-draw loop, plus a warm pulse that
+ * runs along the wire like current. Desktop only, reduced-motion off.
  */
 
 import { useEffect, useState } from "react";
-import { motion, useScroll, useSpring, useReducedMotion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 
 export default function Lifeline() {
   const reduced = useReducedMotion();
-  const { scrollYProgress } = useScroll();
-  const len = useSpring(scrollYProgress, { stiffness: 90, damping: 26 });
   const [height, setHeight] = useState(2400);
 
   useEffect(() => {
@@ -42,12 +41,34 @@ export default function Lifeline() {
   return (
     <div className="pointer-events-none fixed left-3 top-0 z-0 hidden h-full xl:block" aria-hidden>
       <svg width={w} height={height} className="h-full">
+        {/* the wire draws itself in, holds, releases — an endless breath */}
         <motion.path
           d={d}
           stroke="var(--sand)"
           strokeWidth="1.5"
           fill="none"
-          style={{ pathLength: len }}
+          initial={{ pathLength: 0 }}
+          animate={{ pathLength: [0, 1, 1, 0] }}
+          transition={{
+            duration: 18,
+            times: [0, 0.42, 0.62, 1],
+            ease: "easeInOut",
+            repeat: Infinity,
+          }}
+        />
+        {/* a warm pulse traveling along the wire, like current */}
+        <motion.path
+          d={d}
+          stroke="var(--accent)"
+          strokeWidth="1.5"
+          fill="none"
+          strokeLinecap="round"
+          pathLength={1}
+          strokeDasharray="0.015 0.06"
+          initial={{ strokeDashoffset: 1 }}
+          animate={{ strokeDashoffset: 0 }}
+          transition={{ duration: 9, ease: "linear", repeat: Infinity }}
+          opacity={0.55}
         />
       </svg>
     </div>
