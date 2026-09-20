@@ -1,19 +1,15 @@
 "use client";
 
 /**
- * TemplateCards — sticky-stacked full-width cards (§3.2 / §4.3).
- * Each template pins, the next slides over it; illustration layer parallaxes.
- * Each card runs its own signature micro-motion, paused off-screen (§3.4).
+ * TemplateCards — v3. No sticky stack, no scroll parallax (scroll-linked
+ * motion is banned). Instead: staggered entrances, hover layer shifts, and
+ * four always-on signature micro-motions that run on their own clocks,
+ * paused when off-screen (§3.4). Cards alternate direction for editorial
+ * asymmetry (no equal-card monotony).
  */
 
 import { useEffect, useRef, useState } from "react";
-import {
-  motion,
-  useInView,
-  useReducedMotion,
-  useScroll,
-  useTransform,
-} from "framer-motion";
+import { motion, useInView, useReducedMotion } from "framer-motion";
 import { ArrowLink, Eyebrow, Icon, MediaSlot } from "../ui";
 
 const CARDS = [
@@ -52,12 +48,20 @@ const CARDS = [
 ] as const;
 
 export default function TemplateCards() {
+  const reduced = useReducedMotion();
   return (
     <section id="templates" className="relative mx-auto max-w-[1200px] px-6 py-28 md:py-40">
-      <Eyebrow>Four templates</Eyebrow>
-      <h2 className="display mt-4 max-w-[16ch] text-[36px] leading-[1.1] text-ink md:text-[56px]">
-        Pick the shape of your condition
-      </h2>
+      <motion.div
+        initial={reduced ? false : { opacity: 0, y: 20 }}
+        whileInView={{ opacity: 1, y: 0 }}
+        viewport={{ once: true, margin: "-80px" }}
+        transition={{ duration: 0.6, ease: [1, 0, 0.3, 0.93] }}
+      >
+        <Eyebrow>Four templates</Eyebrow>
+        <h2 className="display mt-4 max-w-[16ch] text-[36px] leading-[1.1] text-ink md:text-[56px]">
+          Pick the shape of your condition
+        </h2>
+      </motion.div>
 
       <div className="mt-16 space-y-10">
         {CARDS.map((c, i) => (
@@ -71,22 +75,28 @@ export default function TemplateCards() {
 function Card({ card, index }: { card: (typeof CARDS)[number]; index: number }) {
   const ref = useRef<HTMLDivElement>(null);
   const inView = useInView(ref, { margin: "-15% 0px -15% 0px" });
-  const { scrollYProgress } = useScroll({ target: ref, offset: ["start end", "end start"] });
-  const parallaxY = useTransform(scrollYProgress, [0, 1], [30, -30]);
+  const reduced = useReducedMotion();
+  const flip = index % 2 === 1; // alternate copy/media sides
 
   return (
-    <div
+    <motion.div
       ref={ref}
-      className="md:sticky"
-      style={{ top: 88 + index * 14 }}
+      initial={reduced ? false : { opacity: 0, y: 32 }}
+      whileInView={{ opacity: 1, y: 0 }}
+      viewport={{ once: true, margin: "-60px" }}
+      transition={{ duration: 0.7, delay: 0.06 * index, ease: [1, 0, 0.3, 0.93] }}
     >
       <div
-        className="overflow-hidden rounded-2xl border bg-cream"
+        className="template-card group overflow-hidden rounded-2xl border bg-cream"
         style={{ borderColor: "var(--hairline)" }}
       >
         <div className="grid grid-cols-1 md:grid-cols-12">
           {/* copy */}
-          <div className="flex flex-col justify-between p-8 md:col-span-5 md:p-12">
+          <div
+            className={`flex flex-col justify-between p-8 md:col-span-5 md:p-12 ${
+              flip ? "md:order-2" : ""
+            }`}
+          >
             <div>
               <div className="flex items-center gap-3">
                 <Icon kind={card.id} color="var(--accent)" />
@@ -102,17 +112,24 @@ function Card({ card, index }: { card: (typeof CARDS)[number]; index: number }) 
             </div>
           </div>
 
-          {/* illustration + signature micro-motion */}
-          <div className="relative min-h-[320px] md:col-span-7">
-            <motion.div className="absolute inset-0" style={{ y: parallaxY }}>
-              <MediaSlot
-                name={card.media}
-                alt={card.alt}
-                className="absolute inset-0"
-              />
-            </motion.div>
-            <div className="absolute inset-0" style={{ background: "linear-gradient(90deg, rgba(245,236,229,0.55), transparent 40%)" }} />
-            <div className="absolute inset-0">
+          {/* illustration + signature micro-motion (layers shift on hover) */}
+          <div
+            className={`relative min-h-[320px] overflow-hidden md:col-span-7 ${
+              flip ? "md:order-1" : ""
+            }`}
+          >
+            <div className="layer-media absolute inset-0">
+              <MediaSlot name={card.media} alt={card.alt} className="absolute inset-0" />
+            </div>
+            <div
+              className="absolute inset-0"
+              style={{
+                background: flip
+                  ? "linear-gradient(270deg, rgba(245,236,229,0.55), transparent 40%)"
+                  : "linear-gradient(90deg, rgba(245,236,229,0.55), transparent 40%)",
+              }}
+            />
+            <div className="layer-chip absolute inset-0">
               {card.id === "fade" && <FadeMotion active={inView} />}
               {card.id === "pod" && <PodMotion active={inView} />}
               {card.id === "trigger" && <TriggerMotion active={inView} />}
@@ -121,7 +138,7 @@ function Card({ card, index }: { card: (typeof CARDS)[number]; index: number }) 
           </div>
         </div>
       </div>
-    </div>
+    </motion.div>
   );
 }
 
@@ -157,7 +174,7 @@ function FadeMotion({ active }: { active: boolean }) {
           stroke="var(--accent)" strokeWidth="2" fill="none" strokeLinecap="round"
         />
         <circle
-          cx={Math.min(200, (t % 26) * 8.4)}
+          cx={Math.min(200, cycle * 8.4)}
           cy={8 + Math.min(32, (cycle / 25) * 32)}
           r="3.5"
           fill={below ? "#8F4E2A" : "var(--accent)"}
@@ -300,7 +317,7 @@ function EnvoyMotion({ active }: { active: boolean }) {
         </svg>
         <div>
           <div className="tnum font-mono text-[13px] text-ink">
-            {Math.round(spent * 250)} / 250 TRYT
+            {Math.round(spent * 250)} / 250 TRY
           </div>
           <div className="mt-1 h-1 w-[96px] rounded-full" style={{ background: "var(--hairline)" }}>
             <div

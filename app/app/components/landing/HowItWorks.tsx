@@ -7,8 +7,8 @@
  * and the price recompute live.
  */
 
-import { useEffect, useMemo, useState } from "react";
-import { motion, useReducedMotion } from "framer-motion";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { motion, useInView, useReducedMotion } from "framer-motion";
 import { Eyebrow } from "../ui";
 
 const STAGES = [
@@ -107,10 +107,18 @@ function StageLabel({ id, label }: { id: string; label: string }) {
       className="flex items-center gap-3 text-[14px] font-medium transition-colors duration-300"
       style={{ color: active ? "var(--accent)" : "var(--muted)" }}
     >
-      <span
-        className="block h-px transition-all duration-300"
-        style={{ width: active ? 32 : 18, background: active ? "var(--accent)" : "var(--sand)" }}
-      />
+      <span className="relative flex w-8 items-center">
+        <span
+          className="block h-px transition-all duration-300"
+          style={{ width: active ? 32 : 18, background: active ? "var(--accent)" : "var(--sand)" }}
+        />
+        {active && (
+          <span
+            className="stage-dot absolute -right-1 h-1.5 w-1.5 rounded-full"
+            style={{ background: "var(--accent)" }}
+          />
+        )}
+      </span>
       {label}
     </a>
   );
@@ -118,28 +126,50 @@ function StageLabel({ id, label }: { id: string; label: string }) {
 
 /* --- Micro-demos -------------------------------------------------------- */
 
-/** Playable decay explainer: drag the rate, watch curve + price recompute */
+/** Playable decay explainer: drag the rate, watch curve + price recompute.
+ *  A "now" bead sweeps the curve on its own clock; the mono readout ticks. */
 function DecayPlayground() {
-  const [rate, setRate] = useState(6); // TRYT per tick
+  const reduced = useReducedMotion();
+  const box = useRef<HTMLDivElement>(null);
+  const inView = useInView(box, { margin: "-10% 0px -10% 0px" });
+  const [rate, setRate] = useState(6); // TRY per tick
   const start = 1000;
   const ticks = 80;
   const floor = -200;
 
+  // the bead's own clock — sweeps 0..80 ticks, pauses off-screen
+  const [now, setNow] = useState(0);
+  useEffect(() => {
+    if (!inView || reduced) return;
+    const id = setInterval(() => setNow((n) => (n + 1) % (ticks + 1)), 90);
+    return () => clearInterval(id);
+  }, [inView, reduced]);
+
+  const pointAt = (t: number) => {
+    const p = Math.max(floor, start - rate * t);
+    return {
+      p,
+      x: 20 + (t / ticks) * 440,
+      y: 60 + ((start - p) / (start - floor)) * 240,
+    };
+  };
+
   const { path, finalPrice } = useMemo(() => {
     const pts: string[] = [];
     for (let t = 0; t <= ticks; t++) {
-      const p = Math.max(floor, start - rate * t);
-      const x = 20 + (t / ticks) * 440;
-      const y = 60 + ((start - p) / (start - floor)) * 240;
+      const { x, y } = pointAt(t);
       pts.push(`${t === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`);
     }
     return { path: pts.join(" "), finalPrice: Math.max(floor, start - rate * ticks) };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rate, floor]);
 
   const zeroY = 60 + (start / (start - floor)) * 240;
+  const bead = pointAt(now);
+  const beadBelow = bead.p < 0;
 
   return (
-    <div className="mt-6 rounded-xl border bg-cream p-5" style={{ borderColor: "var(--hairline)" }}>
+    <div ref={box} className="mt-6 rounded-xl border bg-cream p-5" style={{ borderColor: "var(--hairline)" }}>
       <div className="flex flex-wrap items-baseline justify-between gap-3">
         <div className="text-[12px] font-semibold uppercase tracking-[0.12em] text-muted">
           Playable — decay rate
@@ -149,7 +179,7 @@ function DecayPlayground() {
           style={{ color: finalPrice < 0 ? "#8F4E2A" : "var(--accent)" }}
         >
           {finalPrice.toLocaleString("en-US")}.00
-          <span className="ml-2 text-[13px] font-sans text-muted">TRYT at tick {ticks}</span>
+          <span className="ml-2 text-[13px] font-sans text-muted">TRY at tick {ticks}</span>
         </div>
       </div>
       <svg viewBox="0 0 480 330" className="mt-3 w-full">
@@ -165,12 +195,23 @@ function DecayPlayground() {
           strokeLinecap="round"
           clipPath="url(#belowZero)"
         />
+        {/* the sweeping "now" bead */}
+        <circle cx={bead.x} cy={bead.y} r="8" fill="none"
+          stroke={beadBelow ? "#8F4E2A" : "var(--accent)"} strokeWidth="1" opacity="0.5" />
+        <circle cx={bead.x} cy={bead.y} r="4" fill={beadBelow ? "#8F4E2A" : "var(--accent)"} />
         <defs>
           <clipPath id="belowZero">
             <rect x="0" y={zeroY} width="480" height={330 - zeroY} />
           </clipPath>
         </defs>
       </svg>
+      <div className="mt-1 font-mono text-[11px] text-muted">
+        now: tick <span className="tnum">{now}</span> · price{" "}
+        <span className="tnum" style={{ color: beadBelow ? "#8F4E2A" : "var(--accent)" }}>
+          {bead.p.toLocaleString("en-US")}.00
+        </span>{" "}
+        TRY{beadBelow ? " — below zero" : ""}
+      </div>
       <input
         type="range"
         min={1}
@@ -178,11 +219,11 @@ function DecayPlayground() {
         value={rate}
         onChange={(e) => setRate(Number(e.target.value))}
         className="mt-2 w-full accent-[#BC773F]"
-        aria-label="Decay rate in TRYT per tick"
+        aria-label="Decay rate in TRY per tick"
       />
       <div className="mt-1 flex justify-between font-mono text-[11px] text-muted">
         <span>gentle — 1/tick</span>
-        <span className="tnum">{rate} TRYT / tick</span>
+        <span className="tnum">{rate} TRY / tick</span>
         <span>steep — 16/tick</span>
       </div>
     </div>
