@@ -810,6 +810,8 @@ fn envoy_claim_within_cap() {
     // Negative price is free: no budget was consumed.
     let m = s.client.get_mandate(&mandate_id);
     assert_eq!(m.daily_used, 0);
+    // ...but the claim-count cap (audit v2 finding 2) did tick.
+    assert_eq!(m.claims_used, 1);
     assert!(!m.revoked);
 }
 
@@ -953,6 +955,171 @@ fn envoy_claim_recipient_binding() {
     let f = s.client.get_fade(&fade_id);
     assert_eq!(f.claimant, Some(owner));
     assert_eq!(f.claimed_at, Some(start + 80));
+}
+
+// ---- Audit v2 FIX 1 PoC: refund does not overflow with a huge
+// handoff_window; the seller gets the pot back ----
+#[test]
+fn refund_no_overflow_huge_handoff_window() {
+    let s = setup();
+    let seller = Address::generate(&s.env);
+    let claimant = Address::generate(&s.env);
+    s.token_admin.mint(&seller, &400);
+
+    // Largest allowed window (MAX_LEDGER_SPAN = 1_000_000). Before the fix,
+    // `claimed_at + handoff_window` in refund was an unchecked u32 add — with
+    // an unbounded window this could overflow-panic and lock the pot forever.
+    let id = s.client.create_fade(
+        &seller, &s.asset, &400, &100, &0, &1, &1, &100, &1_000_000, &venue_pubkey(&s.env),
+    );
+
+    let start = start_ledger(&s.env);
+    s.env.ledger().set_sequence_number(start + 5);
+    s.client.claim(&id, &claimant); // claimed_at = start + 5
+
+    // Within the window: refund still rejected (no trap, defined error).
+    s.env.ledger().set_sequence_number(start + 100);
+    assert_eq!(s.client.try_refund(&id), Err(Ok(Error::DeadlinePassed)));
+
+    // Window elapsed (start+5+1_000_000 < start+1_000_006): saturating_add
+    // keeps the comparison safe and the seller recovers the pot.
+    s.env.ledger().set_sequence_number(start + 1_000_006);
+    s.client.refund(&id);
+    assert_eq!(s.token.balance(&seller), 400);
+    assert_eq!(s.token.balance(&s.client.address), 0);
+    assert_eq!(s.client.get_fade(&id).state, 3);
+}
+
+// ---- Audit v2 FIX 1: absurd duration/handoff_window rejected at create ----
+#[test]
+fn oversized_duration_or_window_rejected() {
+    let s = setup();
+    let seller = Address::generate(&s.env);
+    s.token_admin.mint(&seller, &100);
+
+    // duration_ledgers above the 1_000_000 ledger bound -> InvalidInput.
+    assert_eq!(
+        s.client.try_create_fade(
+            &seller, &s.asset, &100, &50, &0, &1, &1, &1_000_001, &10, &venue_pubkey(&s.env),
+        ),
+        Err(Ok(Error::InvalidInput))
+    );
+    // handoff_window near u32::MAX (the audit's overflow vector) -> InvalidInput.
+    assert_eq!(
+        s.client.try_create_fade(
+            &seller, &s.asset, &100, &50, &0, &1, &1, &100, &u32::MAX, &venue_pubkey(&s.env),
+        ),
+        Err(Ok(Error::InvalidInput))
+    );
+    // Boundary value exactly at the bound is accepted.
+    let id = s.client.create_fade(
+        &seller, &s.asset, &100, &50, &0, &1, &1, &1_000_000, &1_000_000, &venue_pubkey(&s.env),
+    );
+    assert_eq!(id, 1);
+}
+
+// ---- Audit v2 FIX 3: create_trigger rejects a past/current deadline ----
+#[test]
+fn create_trigger_past_deadline_rejected() {
+    let s = setup();
+    let funder = Address::generate(&s.env);
+    let beneficiary = Address::generate(&s.env);
+    s.token_admin.mint(&funder, &500);
+
+    // Move the ledger forward so "past" deadlines exist.
+    s.env.ledger().set_sequence_number(100);
+    let now = start_ledger(&s.env);
+
+    // Deadline in the past -> InvalidInput (consistent with create_mandate).
+    assert_eq!(
+        s.client.try_create_trigger(
+            &funder,
+            &s.asset,
+            &500,
+            &beneficiary,
+            &attester_pubkey(&s.env),
+            &(now - 1),
+        ),
+        Err(Ok(Error::InvalidInput))
+    );
+    // Deadline exactly at the current ledger -> also InvalidInput.
+    assert_eq!(
+        s.client.try_create_trigger(
+            &funder,
+            &s.asset,
+            &500,
+            &beneficiary,
+            &attester_pubkey(&s.env),
+            &now,
+        ),
+        Err(Ok(Error::InvalidInput))
+    );
+    // A future deadline still works; funds moved only for the valid create.
+    let id = s.client.create_trigger(
+        &funder,
+        &s.asset,
+        &500,
+        &beneficiary,
+        &attester_pubkey(&s.env),
+        &(now + 50),
+    );
+    assert_eq!(id, 1);
+    assert_eq!(s.token.balance(&funder), 0);
+}
+
+// ---- Audit v2 FIX 2: per-mandate claim-count cap (MAX_CLAIMS_PER_MANDATE=50) ----
+#[test]
+fn envoy_claim_count_cap() {
+    let s = setup();
+    let owner = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+
+    let start = start_ledger(&s.env);
+    let mandate_id = s.client.create_mandate(
+        &owner,
+        &agent_pubkey(&s.env),
+        &100,
+        &1000,
+        &(start + 1000),
+    );
+
+    // 51 campaign fades (each is claimable exactly once).
+    let mut fades = std::vec::Vec::new();
+    for _ in 0..51 {
+        fades.push(setup_campaign_fade(&s, &seller));
+    }
+
+    // 80 ledgers later every fade sits at the floor price (-50), so each
+    // claim is a valid price<=0 campaign claim; the monetary caps never
+    // engage (daily_used stays 0) — only the claim-count cap bounds the agent.
+    s.env.ledger().set_sequence_number(start + 80);
+
+    // 50 claims succeed; the counter tracks them.
+    for (i, fade_id) in fades.iter().take(50).enumerate() {
+        let ts = 100 + i as u64;
+        s.client
+            .envoy_claim(&mandate_id, fade_id, &ts, &sign_envoy(&s.env, mandate_id, *fade_id, ts));
+    }
+    let m = s.client.get_mandate(&mandate_id);
+    assert_eq!(m.claims_used, 50);
+    assert_eq!(m.daily_used, 0); // monetary cap still untouched (documented dead cap)
+
+    // The 51st claim is rejected with CapExceeded even though price <= 0 and
+    // every other check would pass.
+    let fade_51 = fades[50];
+    assert_eq!(s.client.fade_price(&fade_51), -50);
+    assert_eq!(
+        s.client.try_envoy_claim(
+            &mandate_id,
+            &fade_51,
+            &999,
+            &sign_envoy(&s.env, mandate_id, fade_51, 999),
+        ),
+        Err(Ok(Error::CapExceeded))
+    );
+    // The rejected attempt did not consume anything.
+    assert_eq!(s.client.get_mandate(&mandate_id).claims_used, 50);
+    assert_eq!(s.client.get_fade(&fade_51).state, 0);
 }
 
 // ---- Cross-template: a mandate claim settles into the owner's fade claim ----
