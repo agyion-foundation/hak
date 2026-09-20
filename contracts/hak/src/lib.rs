@@ -1,91 +1,156 @@
 #![no_std]
-//! HAK MVP kernel kontrati.
+//! Agyion kernel contract (v2).
 //!
-//! Tek kontrat, iki sablon: Son Saat (tersine akan fiyat saati + venue imzali
-//! teslim) ve Kapsul (zaman kilitli + preimage anahtarli fon). Butun imzalar ve
-//! kurallar SPEC.md §3'e birebir baglidir; burada degistirilmez.
+//! Single contract, four templates:
+//! - **Fade** (was Son Saat): declining price clock + venue-signed handoff.
+//! - **Pod** (was Kapsul): time-locked + preimage-keyed fund.
+//! - **Trigger**: event escrow executed by an independent attester's ed25519 signature.
+//! - **Envoy**: on-chain limited mandate — an agent key may claim Fade listings for the owner.
+//!
+//! All signatures and rules are bound 1:1 to SPEC_V2.md; do not change them here.
 
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Bytes, BytesN, Env};
 
-mod kapsul;
-mod son_saat;
+mod envoy;
+mod fade;
+mod pod;
+mod trigger;
 
 #[cfg(test)]
 mod test;
 
-/// Zincirde anlam generiktir (CANON kural 7): T1=1, T2=2.
+/// TTL extension thresholds for persistent records (~1 day threshold, ~10 day
+/// target; assumes 5s/ledger).
+///
+/// NOTE (honesty, mirrors LIMITATIONS): records expected to live longer than
+/// TTL_EXTEND = 172_800 ledgers (~10 days) may be archived before their
+/// deadlines. The contract has no restore flow; an archived record can only be
+/// brought back via a chain-side restore preamble (Soroban restore-footprint).
+/// That is why TTL is extended on both write and read paths, and instance
+/// storage (counters) is extended as well. Still, for lifetimes beyond ~10
+/// days the restore obligation belongs to the operator.
+pub(crate) const TTL_THRESHOLD: u32 = 17_280;
+pub(crate) const TTL_EXTEND: u32 = 172_800;
+
+/// On-chain meaning is generic (CANON rule 7): T1=1, T2=2, T3=3, T4=4.
 #[contracttype]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum Template {
-    SonSaat = 1,
-    Kapsul = 2,
+    Fade = 1,
+    Pod = 2,
+    Trigger = 3,
+    Envoy = 4,
 }
 
-/// Son Saat ilani (SPEC §3.1 — alan adlari ve tipler kutsal).
+/// Fade listing (SPEC_V2 — field names and types are sacred).
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct Listing {
+pub struct Fade {
     pub seller: Address,
     pub asset: Address,
     pub pot: i128,
-    pub start_price: i128, // stroop-benzeri minor unit
-    pub floor_price: i128, // negatif olabilir (alt sinir)
+    pub start_price: i128, // stroop-like minor unit
+    pub floor_price: i128, // may be negative (lower bound)
     pub start_ledger: u32,
     pub deadline_ledger: u32,
-    pub pickup_window: u32,
+    pub handoff_window: u32,
     pub slope_num: i128,
-    pub slope_den: i128, // ledger basina dusus (rasyonel)
+    pub slope_den: i128, // decline per ledger (rational)
     pub venue_pubkey: BytesN<32>,
-    pub state: u32, // 0=acik 1=claim edildi 2=teslim tamam 3=iade edildi
+    pub state: u32, // 0=open 1=claimed 2=handoff confirmed 3=refunded
     pub claimant: Option<Address>,
     pub claimed_at: Option<u32>,
 }
 
-/// Kapsul (SPEC §3.1).
+/// Pod: time capsule (SPEC_V2).
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct Capsule {
+pub struct Pod {
     pub funder: Address,
     pub asset: Address,
     pub amount: i128,
     pub unlock_ledger: u32,
     pub key_hash: BytesN<32>, // sha256(preimage)
-    pub state: u32,           // 0=gomulu 1=acildi
+    pub state: u32,           // 0=buried 1=opened
 }
 
-/// Panic yerine tanimli hata kodlari (SPEC §3.3).
+/// Trigger: event escrow (SPEC_V2). Funder locks funds for a beneficiary; an
+/// independent attester's ed25519 signature executes the payout; after the
+/// deadline a rule-based refund returns funds to the funder.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Trigger {
+    pub funder: Address,
+    pub asset: Address,
+    pub amount: i128,
+    pub beneficiary: Address,
+    pub attester_pubkey: BytesN<32>,
+    pub deadline_ledger: u32,
+    pub state: u32, // 0=pending 1=executed 2=refunded
+}
+
+/// Mandate: on-chain limited grant (SPEC_V2). The owner authorizes an agent
+/// key (ed25519) to claim Fade listings FOR the owner; recipient is fixed to
+/// the owner.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Mandate {
+    pub owner: Address,
+    pub agent_pubkey: BytesN<32>,
+    pub max_per_tx: i128,
+    pub daily_cap: i128,
+    pub valid_until: u32, // last ledger the mandate is usable
+    pub daily_used: i128, // spend accumulated in the current window
+    pub window_start: u32, // ledger where the current daily window began
+    pub revoked: bool,
+}
+
+/// Defined error codes instead of panics (SPEC §3.3 / SPEC_V2 rules).
+///
+/// Numbering: the 8 v1 errors keep their discriminants; the new v2 variants
+/// continue from 9. Discriminant 8 is reserved (v1's signature-format error
+/// was merged into `BadSignature` = 7: a preimage/key mismatch and an
+/// unverifiable pubkey/signature are both credential failures).
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
-pub enum Hata {
-    Bulunamadi = 1,       // listing/capsule kaydi yok
-    DurumUygunDegil = 2,  // state machine bu gecise izin vermiyor
-    MiktarGecersiz = 3,   // pot/amount/fiyat parametresi gecersiz
-    EgitimGecersiz = 4,   // slope_den=0, slope_num<0 veya duration=0
-    IadeKosuluYok = 5,    // iade icin kural kosulu olusmadi
-    KapsulKilitli = 6,    // unlock_ledger henuz dolmadi
-    AnahtarUyusmadi = 7,  // sha256(preimage) != key_hash
-    ImzaGecersiz = 8,     // venue pubkey sifir/bos veya imza formati gecersiz
+pub enum Error {
+    NotFound = 1,       // fade/pod/trigger/mandate record missing
+    InvalidState = 2,   // state machine does not allow this transition
+    InvalidAmount = 3,  // pot/amount/price parameter invalid
+    InvalidCurve = 4,   // slope_den=0, slope_num<0, duration=0 or handoff_window=0
+    DeadlinePassed = 5, // rule-based refund condition not met / attestation window closed
+    Locked = 6,         // pod unlock_ledger not reached yet
+    BadSignature = 7,   // zero/empty pubkey, bad sig format, or sha256(preimage) != key_hash
+    // 8 reserved (v1 ImzaGecersiz merged into BadSignature)
+    CapExceeded = 9,      // per-tx or daily cap would be exceeded
+    MandateExpired = 10,  // ledger > valid_until
+    Unauthorized = 11,    // mandate revoked, or caller is not the mandate owner
+    InvalidInput = 12,    // parameter combination rejected (e.g. positive price via envoy)
 }
 
 #[contracttype]
 #[derive(Clone, Debug)]
 pub enum DataKey {
-    Listing(u64),
-    Kapsul(u64),
-    ListingSayac,
-    KapsulSayac,
+    Fade(u64),
+    Pod(u64),
+    Trigger(u64),
+    Mandate(u64),
+    FadeCount,
+    PodCount,
+    TriggerCount,
+    MandateCount,
 }
 
 #[contract]
-pub struct Hak;
+pub struct Agyion;
 
 #[contractimpl]
-impl Hak {
-    // ---- Son Saat ----
+impl Agyion {
+    // ---- Fade ----
 
-    pub fn create_listing(
+    pub fn create_fade(
         env: Env,
         seller: Address,
         asset: Address,
@@ -95,10 +160,10 @@ impl Hak {
         slope_num: i128,
         slope_den: i128,
         duration_ledgers: u32,
-        pickup_window: u32,
+        handoff_window: u32,
         venue_pubkey: BytesN<32>,
-    ) -> Result<u64, Hata> {
-        son_saat::create_listing(
+    ) -> Result<u64, Error> {
+        fade::create_fade(
             &env,
             seller,
             asset,
@@ -108,65 +173,144 @@ impl Hak {
             slope_num,
             slope_den,
             duration_ledgers,
-            pickup_window,
+            handoff_window,
             venue_pubkey,
         )
     }
 
-    /// View: ilan kaydini dondurur (SPEC'e ek: frontend getListing icin).
-    /// §3.2 imzalarina dokunmaz; sadece okuma ekler.
-    pub fn get_listing(env: Env, listing_id: u64) -> Result<Listing, Hata> {
-        son_saat::get_listing(&env, listing_id)
+    /// View: current declining price; stops at the floor.
+    pub fn fade_price(env: Env, fade_id: u64) -> i128 {
+        fade::fade_price(&env, fade_id)
     }
 
-    /// View: lineer geriye akan fiyat, floor'da durur.
-    pub fn price_at(env: Env, listing_id: u64) -> i128 {
-        son_saat::price_at(&env, listing_id)
+    /// open -> claimed; claimant authorization required.
+    pub fn claim(env: Env, fade_id: u64, claimant: Address) -> Result<(), Error> {
+        fade::claim(&env, fade_id, claimant)
     }
 
-    /// acik -> claim edildi; claimant yetkilendirmesi.
-    pub fn claim(env: Env, listing_id: u64, claimant: Address) -> Result<(), Hata> {
-        son_saat::claim(&env, listing_id, claimant)
+    /// Verifies the venue ed25519 signature
+    /// (payload: fade_id(8B BE) || claimant XDR || ts(8B BE)); settles at the
+    /// price frozen at `claimed_at`.
+    pub fn confirm_handoff(env: Env, fade_id: u64, ts: u64, sig: BytesN<64>) -> Result<(), Error> {
+        fade::confirm_handoff(&env, fade_id, ts, sig)
     }
 
-    /// venue ed25519 imzasi (payload: listing_id||claimant||ts) dogrular;
-    /// fiyat price_at(claimed_at) uzerinden settle eder.
-    pub fn confirm_pickup(env: Env, listing_id: u64, ts: u64, sig: BytesN<64>) -> Result<(), Hata> {
-        son_saat::confirm_pickup(&env, listing_id, ts, sig)
+    /// Rule-based refund: if the deadline passed (no claim) or the
+    /// handoff_window elapsed (no handoff), the pot returns to the seller.
+    /// No discretion; anyone may call.
+    pub fn refund(env: Env, fade_id: u64) -> Result<(), Error> {
+        fade::refund(&env, fade_id)
     }
 
-    /// Kurali geri donus: deadline gectiyse (claim yoksa) veya pickup_window
-    /// dolduysa (teslim yoksa) pot seller'a. Takdir yok, herkes cagirabilir.
-    pub fn iade(env: Env, listing_id: u64) -> Result<(), Hata> {
-        son_saat::iade(&env, listing_id)
+    /// View: returns the fade record.
+    pub fn get_fade(env: Env, fade_id: u64) -> Result<Fade, Error> {
+        fade::get_fade(&env, fade_id)
     }
 
-    // ---- Kapsul ----
+    // ---- Pod ----
 
-    /// View: kapsul kaydini dondurur (SPEC'e ek: frontend getCapsule icin).
-    pub fn get_capsule(env: Env, capsule_id: u64) -> Result<Capsule, Hata> {
-        kapsul::get_capsule(&env, capsule_id)
-    }
-
-    pub fn create_capsule(
+    pub fn create_pod(
         env: Env,
         funder: Address,
         asset: Address,
         amount: i128,
         unlock_ledger: u32,
         key_hash: BytesN<32>,
-    ) -> Result<u64, Hata> {
-        kapsul::create_capsule(&env, funder, asset, amount, unlock_ledger, key_hash)
+    ) -> Result<u64, Error> {
+        pod::create_pod(&env, funder, asset, amount, unlock_ledger, key_hash)
     }
 
-    /// sha256(preimage)==key_hash && ledger>=unlock_ledger; recipient tx
-    /// gonderene baglidir (front-running korumasi — final review F2).
-    pub fn claim_capsule(
+    /// sha256(preimage)==key_hash && ledger>=unlock_ledger; recipient must
+    /// authorize the transaction (front-running protection — final review F2).
+    pub fn claim_pod(
         env: Env,
-        capsule_id: u64,
+        pod_id: u64,
         preimage: Bytes,
         recipient: Address,
-    ) -> Result<(), Hata> {
-        kapsul::claim_capsule(&env, capsule_id, preimage, recipient)
+    ) -> Result<(), Error> {
+        pod::claim_pod(&env, pod_id, preimage, recipient)
+    }
+
+    /// View: returns the pod record.
+    pub fn get_pod(env: Env, pod_id: u64) -> Result<Pod, Error> {
+        pod::get_pod(&env, pod_id)
+    }
+
+    // ---- Trigger ----
+
+    pub fn create_trigger(
+        env: Env,
+        funder: Address,
+        asset: Address,
+        amount: i128,
+        beneficiary: Address,
+        attester_pubkey: BytesN<32>,
+        deadline_ledger: u32,
+    ) -> Result<u64, Error> {
+        trigger::create_trigger(
+            &env,
+            funder,
+            asset,
+            amount,
+            beneficiary,
+            attester_pubkey,
+            deadline_ledger,
+        )
+    }
+
+    /// Attester signature payload: trigger_id(8B BE) || beneficiary XDR ||
+    /// ts(8B BE). Valid sig && ledger <= deadline -> pays the beneficiary.
+    pub fn attest(env: Env, trigger_id: u64, ts: u64, sig: BytesN<64>) -> Result<(), Error> {
+        trigger::attest(&env, trigger_id, ts, sig)
+    }
+
+    /// ledger > deadline && not attested -> funds return to the funder.
+    /// Rule-based, no discretion; anyone may call.
+    pub fn refund_trigger(env: Env, trigger_id: u64) -> Result<(), Error> {
+        trigger::refund_trigger(&env, trigger_id)
+    }
+
+    /// View: returns the trigger record.
+    pub fn get_trigger(env: Env, trigger_id: u64) -> Result<Trigger, Error> {
+        trigger::get_trigger(&env, trigger_id)
+    }
+
+    // ---- Envoy ----
+
+    /// Grants an agent key the right to claim Fade listings for the owner.
+    /// Recipient is fixed to the owner.
+    pub fn create_mandate(
+        env: Env,
+        owner: Address,
+        agent_pubkey: BytesN<32>,
+        max_per_tx: i128,
+        daily_cap: i128,
+        valid_until: u32,
+    ) -> Result<u64, Error> {
+        envoy::create_mandate(&env, owner, agent_pubkey, max_per_tx, daily_cap, valid_until)
+    }
+
+    /// Agent signature payload: mandate_id(8B BE) || fade_id(8B BE) ||
+    /// ts(8B BE). Enforces: ledger <= valid_until, price <= max_per_tx,
+    /// daily_used + price <= daily_cap, then claims the fade with
+    /// claimant = owner.
+    pub fn envoy_claim(
+        env: Env,
+        mandate_id: u64,
+        fade_id: u64,
+        ts: u64,
+        agent_sig: BytesN<64>,
+    ) -> Result<(), Error> {
+        envoy::envoy_claim(&env, mandate_id, fade_id, ts, agent_sig)
+    }
+
+    /// Instant revocation, owner only.
+    pub fn revoke_mandate(env: Env, owner: Address, mandate_id: u64) -> Result<(), Error> {
+        envoy::revoke_mandate(&env, owner, mandate_id)
+    }
+
+    /// View: returns the mandate record.
+    pub fn get_mandate(env: Env, mandate_id: u64) -> Result<Mandate, Error> {
+        envoy::get_mandate(&env, mandate_id)
     }
 }
