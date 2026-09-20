@@ -33,25 +33,11 @@ if (typeof window !== "undefined") {
 
 
 
-/**
- * Panic yerine tanimli hata kodlari (SPEC §3.3).
- */
-export const Hata = {
-  1: {message:"Bulunamadi"},
-  2: {message:"DurumUygunDegil"},
-  3: {message:"MiktarGecersiz"},
-  4: {message:"EgitimGecersiz"},
-  5: {message:"IadeKosuluYok"},
-  6: {message:"KapsulKilitli"},
-  7: {message:"AnahtarUyusmadi"},
-  8: {message:"ImzaGecersiz"}
-}
-
 
 /**
- * Kapsul (SPEC §3.1).
+ * Pod: time capsule (SPEC_V2).
  */
-export interface Capsule {
+export interface Pod {
   amount: i128;
   asset: string;
   funder: string;
@@ -62,15 +48,15 @@ export interface Capsule {
 
 
 /**
- * Son Saat ilani (SPEC §3.1 — alan adlari ve tipler kutsal).
+ * Fade listing (SPEC_V2 — field names and types are sacred).
  */
-export interface Listing {
+export interface Fade {
   asset: string;
   claimant: Option<string>;
   claimed_at: Option<u32>;
   deadline_ledger: u32;
   floor_price: i128;
-  pickup_window: u32;
+  handoff_window: u32;
   pot: i128;
   seller: string;
   slope_den: i128;
@@ -81,62 +67,171 @@ export interface Listing {
   venue_pubkey: Buffer;
 }
 
+/**
+ * Defined error codes instead of panics (SPEC §3.3 / SPEC_V2 rules).
+ * 
+ * Numbering: the 8 v1 errors keep their discriminants; the new v2 variants
+ * continue from 9. Discriminant 8 is reserved (v1's signature-format error
+ * was merged into `BadSignature` = 7: a preimage/key mismatch and an
+ * unverifiable pubkey/signature are both credential failures).
+ */
+export const Errors = {
+  1: {message:"NotFound"},
+  2: {message:"InvalidState"},
+  3: {message:"InvalidAmount"},
+  4: {message:"InvalidCurve"},
+  5: {message:"DeadlinePassed"},
+  6: {message:"Locked"},
+  7: {message:"BadSignature"},
+  9: {message:"CapExceeded"},
+  10: {message:"MandateExpired"},
+  11: {message:"Unauthorized"},
+  12: {message:"InvalidInput"}
+}
+
+
+/**
+ * Mandate: on-chain limited grant (SPEC_V2). The owner authorizes an agent
+ * key (ed25519) to claim Fade listings FOR the owner; recipient is fixed to
+ * the owner.
+ */
+export interface Mandate {
+  agent_pubkey: Buffer;
+  daily_cap: i128;
+  daily_used: i128;
+  max_per_tx: i128;
+  owner: string;
+  revoked: boolean;
+  valid_until: u32;
+  window_start: u32;
+}
+
+
+/**
+ * Trigger: event escrow (SPEC_V2). Funder locks funds for a beneficiary; an
+ * independent attester's ed25519 signature executes the payout; after the
+ * deadline a rule-based refund returns funds to the funder.
+ */
+export interface Trigger {
+  amount: i128;
+  asset: string;
+  attester_pubkey: Buffer;
+  beneficiary: string;
+  deadline_ledger: u32;
+  funder: string;
+  state: u32;
+}
+
 export interface Client {
   /**
-   * Construct and simulate a iade transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   * Kurali geri donus: deadline gectiyse (claim yoksa) veya pickup_window
-   * dolduysa (teslim yoksa) pot seller'a. Takdir yok, herkes cagirabilir.
-   */
-  iade: ({listing_id}: {listing_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
-
-  /**
    * Construct and simulate a claim transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   * acik -> claim edildi; claimant yetkilendirmesi.
+   * open -> claimed; claimant authorization required.
    */
-  claim: ({listing_id, claimant}: {listing_id: u64, claimant: string}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+  claim: ({fade_id, claimant}: {fade_id: u64, claimant: string}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
 
   /**
-   * Construct and simulate a price_at transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   * View: lineer geriye akan fiyat, floor'da durur.
+   * Construct and simulate a attest transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Attester signature payload: trigger_id(8B BE) || beneficiary XDR ||
+   * ts(8B BE). Valid sig && ledger <= deadline -> pays the beneficiary.
    */
-  price_at: ({listing_id}: {listing_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<i128>>
+  attest: ({trigger_id, ts, sig}: {trigger_id: u64, ts: u64, sig: Buffer}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
 
   /**
-   * Construct and simulate a get_capsule transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   * View: kapsul kaydini dondurur (SPEC'e ek: frontend getCapsule icin).
+   * Construct and simulate a refund transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Rule-based refund: if the deadline passed (no claim) or the
+   * handoff_window elapsed (no handoff), the pot returns to the seller.
+   * No discretion; anyone may call.
    */
-  get_capsule: ({capsule_id}: {capsule_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<Capsule>>>
+  refund: ({fade_id}: {fade_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
 
   /**
-   * Construct and simulate a get_listing transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   * View: ilan kaydini dondurur (SPEC'e ek: frontend getListing icin).
-   * §3.2 imzalarina dokunmaz; sadece okuma ekler.
+   * Construct and simulate a get_pod transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * View: returns the pod record.
    */
-  get_listing: ({listing_id}: {listing_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<Listing>>>
+  get_pod: ({pod_id}: {pod_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<Pod>>>
 
   /**
-   * Construct and simulate a claim_capsule transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   * sha256(preimage)==key_hash && ledger>=unlock_ledger; recipient tx
-   * gonderene baglidir (front-running korumasi — final review F2).
+   * Construct and simulate a get_fade transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * View: returns the fade record.
    */
-  claim_capsule: ({capsule_id, preimage, recipient}: {capsule_id: u64, preimage: Buffer, recipient: string}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+  get_fade: ({fade_id}: {fade_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<Fade>>>
 
   /**
-   * Construct and simulate a confirm_pickup transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   * venue ed25519 imzasi (payload: listing_id||claimant||ts) dogrular;
-   * fiyat price_at(claimed_at) uzerinden settle eder.
+   * Construct and simulate a claim_pod transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * sha256(preimage)==key_hash && ledger>=unlock_ledger; recipient must
+   * authorize the transaction (front-running protection — final review F2).
    */
-  confirm_pickup: ({listing_id, ts, sig}: {listing_id: u64, ts: u64, sig: Buffer}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+  claim_pod: ({pod_id, preimage, recipient}: {pod_id: u64, preimage: Buffer, recipient: string}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
 
   /**
-   * Construct and simulate a create_capsule transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Construct and simulate a create_pod transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    */
-  create_capsule: ({funder, asset, amount, unlock_ledger, key_hash}: {funder: string, asset: string, amount: i128, unlock_ledger: u32, key_hash: Buffer}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u64>>>
+  create_pod: ({funder, asset, amount, unlock_ledger, key_hash}: {funder: string, asset: string, amount: i128, unlock_ledger: u32, key_hash: Buffer}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u64>>>
 
   /**
-   * Construct and simulate a create_listing transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Construct and simulate a fade_price transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * View: current declining price; stops at the floor.
    */
-  create_listing: ({seller, asset, pot, start_price, floor_price, slope_num, slope_den, duration_ledgers, pickup_window, venue_pubkey}: {seller: string, asset: string, pot: i128, start_price: i128, floor_price: i128, slope_num: i128, slope_den: i128, duration_ledgers: u32, pickup_window: u32, venue_pubkey: Buffer}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u64>>>
+  fade_price: ({fade_id}: {fade_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<i128>>
+
+  /**
+   * Construct and simulate a create_fade transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   */
+  create_fade: ({seller, asset, pot, start_price, floor_price, slope_num, slope_den, duration_ledgers, handoff_window, venue_pubkey}: {seller: string, asset: string, pot: i128, start_price: i128, floor_price: i128, slope_num: i128, slope_den: i128, duration_ledgers: u32, handoff_window: u32, venue_pubkey: Buffer}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u64>>>
+
+  /**
+   * Construct and simulate a envoy_claim transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Agent signature payload: mandate_id(8B BE) || fade_id(8B BE) ||
+   * ts(8B BE). Enforces: ledger <= valid_until, price <= max_per_tx,
+   * daily_used + price <= daily_cap, then claims the fade with
+   * claimant = owner.
+   */
+  envoy_claim: ({mandate_id, fade_id, ts, agent_sig}: {mandate_id: u64, fade_id: u64, ts: u64, agent_sig: Buffer}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+
+  /**
+   * Construct and simulate a get_mandate transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * View: returns the mandate record.
+   */
+  get_mandate: ({mandate_id}: {mandate_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<Mandate>>>
+
+  /**
+   * Construct and simulate a get_trigger transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * View: returns the trigger record.
+   */
+  get_trigger: ({trigger_id}: {trigger_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<Trigger>>>
+
+  /**
+   * Construct and simulate a create_mandate transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Grants an agent key the right to claim Fade listings for the owner.
+   * Recipient is fixed to the owner.
+   */
+  create_mandate: ({owner, agent_pubkey, max_per_tx, daily_cap, valid_until}: {owner: string, agent_pubkey: Buffer, max_per_tx: i128, daily_cap: i128, valid_until: u32}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u64>>>
+
+  /**
+   * Construct and simulate a create_trigger transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   */
+  create_trigger: ({funder, asset, amount, beneficiary, attester_pubkey, deadline_ledger}: {funder: string, asset: string, amount: i128, beneficiary: string, attester_pubkey: Buffer, deadline_ledger: u32}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u64>>>
+
+  /**
+   * Construct and simulate a refund_trigger transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * ledger > deadline && not attested -> funds return to the funder.
+   * Rule-based, no discretion; anyone may call.
+   */
+  refund_trigger: ({trigger_id}: {trigger_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+
+  /**
+   * Construct and simulate a revoke_mandate transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Instant revocation, owner only.
+   */
+  revoke_mandate: ({owner, mandate_id}: {owner: string, mandate_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+
+  /**
+   * Construct and simulate a confirm_handoff transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Verifies the venue ed25519 signature
+   * (payload: fade_id(8B BE) || claimant XDR || ts(8B BE)); settles at the
+   * price frozen at `claimed_at`.
+   */
+  confirm_handoff: ({fade_id, ts, sig}: {fade_id: u64, ts: u64, sig: Buffer}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
 
 }
 export class Client extends ContractClient {
@@ -156,30 +251,48 @@ export class Client extends ContractClient {
   }
   constructor(public readonly options: ContractClientOptions) {
     super(
-      new ContractSpec([ "AAAABAAAAC9QYW5pYyB5ZXJpbmUgdGFuaW1saSBoYXRhIGtvZGxhcmkgKFNQRUMgwqczLjMpLgAAAAAAAAAABEhhdGEAAAAIAAAAAAAAAApCdWx1bmFtYWRpAAAAAAABAAAAAAAAAA9EdXJ1bVV5Z3VuRGVnaWwAAAAAAgAAAAAAAAAOTWlrdGFyR2VjZXJzaXoAAAAAAAMAAAAAAAAADkVnaXRpbUdlY2Vyc2l6AAAAAAAEAAAAAAAAAA1JYWRlS29zdWx1WW9rAAAAAAAABQAAAAAAAAANS2Fwc3VsS2lsaXRsaQAAAAAAAAYAAAAAAAAAD0FuYWh0YXJVeXVzbWFkaQAAAAAHAAAAAAAAAAxJbXphR2VjZXJzaXoAAAAI",
-        "AAAAAQAAABRLYXBzdWwgKFNQRUMgwqczLjEpLgAAAAAAAAAHQ2Fwc3VsZQAAAAAGAAAAAAAAAAZhbW91bnQAAAAAAAsAAAAAAAAABWFzc2V0AAAAAAAAEwAAAAAAAAAGZnVuZGVyAAAAAAATAAAAAAAAAAhrZXlfaGFzaAAAA+4AAAAgAAAAAAAAAAVzdGF0ZQAAAAAAAAQAAAAAAAAADXVubG9ja19sZWRnZXIAAAAAAAAE",
-        "AAAAAQAAAD1Tb24gU2FhdCBpbGFuaSAoU1BFQyDCpzMuMSDigJQgYWxhbiBhZGxhcmkgdmUgdGlwbGVyIGt1dHNhbCkuAAAAAAAAAAAAAAdMaXN0aW5nAAAAAA4AAAAAAAAABWFzc2V0AAAAAAAAEwAAAAAAAAAIY2xhaW1hbnQAAAPoAAAAEwAAAAAAAAAKY2xhaW1lZF9hdAAAAAAD6AAAAAQAAAAAAAAAD2RlYWRsaW5lX2xlZGdlcgAAAAAEAAAAAAAAAAtmbG9vcl9wcmljZQAAAAALAAAAAAAAAA1waWNrdXBfd2luZG93AAAAAAAABAAAAAAAAAADcG90AAAAAAsAAAAAAAAABnNlbGxlcgAAAAAAEwAAAAAAAAAJc2xvcGVfZGVuAAAAAAAACwAAAAAAAAAJc2xvcGVfbnVtAAAAAAAACwAAAAAAAAAMc3RhcnRfbGVkZ2VyAAAABAAAAAAAAAALc3RhcnRfcHJpY2UAAAAACwAAAAAAAAAFc3RhdGUAAAAAAAAEAAAAAAAAAAx2ZW51ZV9wdWJrZXkAAAPuAAAAIA==",
-        "AAAAAAAAAItLdXJhbGkgZ2VyaSBkb251czogZGVhZGxpbmUgZ2VjdGl5c2UgKGNsYWltIHlva3NhKSB2ZXlhIHBpY2t1cF93aW5kb3cKZG9sZHV5c2EgKHRlc2xpbSB5b2tzYSkgcG90IHNlbGxlcidhLiBUYWtkaXIgeW9rLCBoZXJrZXMgY2FnaXJhYmlsaXIuAAAAAARpYWRlAAAAAQAAAAAAAAAKbGlzdGluZ19pZAAAAAAABgAAAAEAAAPpAAAAAgAAB9AAAAAESGF0YQ==",
-        "AAAAAAAAAC9hY2lrIC0+IGNsYWltIGVkaWxkaTsgY2xhaW1hbnQgeWV0a2lsZW5kaXJtZXNpLgAAAAAFY2xhaW0AAAAAAAACAAAAAAAAAApsaXN0aW5nX2lkAAAAAAAGAAAAAAAAAAhjbGFpbWFudAAAABMAAAABAAAD6QAAAAIAAAfQAAAABEhhdGE=",
-        "AAAAAAAAAC9WaWV3OiBsaW5lZXIgZ2VyaXllIGFrYW4gZml5YXQsIGZsb29yJ2RhIGR1cnVyLgAAAAAIcHJpY2VfYXQAAAABAAAAAAAAAApsaXN0aW5nX2lkAAAAAAAGAAAAAQAAAAs=",
-        "AAAAAAAAAERWaWV3OiBrYXBzdWwga2F5ZGluaSBkb25kdXJ1ciAoU1BFQydlIGVrOiBmcm9udGVuZCBnZXRDYXBzdWxlIGljaW4pLgAAAAtnZXRfY2Fwc3VsZQAAAAABAAAAAAAAAApjYXBzdWxlX2lkAAAAAAAGAAAAAQAAA+kAAAfQAAAAB0NhcHN1bGUAAAAH0AAAAARIYXRh",
-        "AAAAAAAAAHFWaWV3OiBpbGFuIGtheWRpbmkgZG9uZHVydXIgKFNQRUMnZSBlazogZnJvbnRlbmQgZ2V0TGlzdGluZyBpY2luKS4KwqczLjIgaW16YWxhcmluYSBkb2t1bm1hejsgc2FkZWNlIG9rdW1hIGVrbGVyLgAAAAAAAAtnZXRfbGlzdGluZwAAAAABAAAAAAAAAApsaXN0aW5nX2lkAAAAAAAGAAAAAQAAA+kAAAfQAAAAB0xpc3RpbmcAAAAH0AAAAARIYXRh",
-        "AAAAAAAAAIJzaGEyNTYocHJlaW1hZ2UpPT1rZXlfaGFzaCAmJiBsZWRnZXI+PXVubG9ja19sZWRnZXI7IHJlY2lwaWVudCB0eApnb25kZXJlbmUgYmFnbGlkaXIgKGZyb250LXJ1bm5pbmcga29ydW1hc2kg4oCUIGZpbmFsIHJldmlldyBGMikuAAAAAAANY2xhaW1fY2Fwc3VsZQAAAAAAAAMAAAAAAAAACmNhcHN1bGVfaWQAAAAAAAYAAAAAAAAACHByZWltYWdlAAAADgAAAAAAAAAJcmVjaXBpZW50AAAAAAAAEwAAAAEAAAPpAAAAAgAAB9AAAAAESGF0YQ==",
-        "AAAAAAAAAHR2ZW51ZSBlZDI1NTE5IGltemFzaSAocGF5bG9hZDogbGlzdGluZ19pZHx8Y2xhaW1hbnR8fHRzKSBkb2dydWxhcjsKZml5YXQgcHJpY2VfYXQoY2xhaW1lZF9hdCkgdXplcmluZGVuIHNldHRsZSBlZGVyLgAAAA5jb25maXJtX3BpY2t1cAAAAAAAAwAAAAAAAAAKbGlzdGluZ19pZAAAAAAABgAAAAAAAAACdHMAAAAAAAYAAAAAAAAAA3NpZwAAAAPuAAAAQAAAAAEAAAPpAAAAAgAAB9AAAAAESGF0YQ==",
-        "AAAAAAAAAAAAAAAOY3JlYXRlX2NhcHN1bGUAAAAAAAUAAAAAAAAABmZ1bmRlcgAAAAAAEwAAAAAAAAAFYXNzZXQAAAAAAAATAAAAAAAAAAZhbW91bnQAAAAAAAsAAAAAAAAADXVubG9ja19sZWRnZXIAAAAAAAAEAAAAAAAAAAhrZXlfaGFzaAAAA+4AAAAgAAAAAQAAA+kAAAAGAAAH0AAAAARIYXRh",
-        "AAAAAAAAAAAAAAAOY3JlYXRlX2xpc3RpbmcAAAAAAAoAAAAAAAAABnNlbGxlcgAAAAAAEwAAAAAAAAAFYXNzZXQAAAAAAAATAAAAAAAAAANwb3QAAAAACwAAAAAAAAALc3RhcnRfcHJpY2UAAAAACwAAAAAAAAALZmxvb3JfcHJpY2UAAAAACwAAAAAAAAAJc2xvcGVfbnVtAAAAAAAACwAAAAAAAAAJc2xvcGVfZGVuAAAAAAAACwAAAAAAAAAQZHVyYXRpb25fbGVkZ2VycwAAAAQAAAAAAAAADXBpY2t1cF93aW5kb3cAAAAAAAAEAAAAAAAAAAx2ZW51ZV9wdWJrZXkAAAPuAAAAIAAAAAEAAAPpAAAABgAAB9AAAAAESGF0YQ==" ]),
+      new ContractSpec([ "AAAAAQAAABxQb2Q6IHRpbWUgY2Fwc3VsZSAoU1BFQ19WMikuAAAAAAAAAANQb2QAAAAABgAAAAAAAAAGYW1vdW50AAAAAAALAAAAAAAAAAVhc3NldAAAAAAAABMAAAAAAAAABmZ1bmRlcgAAAAAAEwAAAAAAAAAIa2V5X2hhc2gAAAPuAAAAIAAAAAAAAAAFc3RhdGUAAAAAAAAEAAAAAAAAAA11bmxvY2tfbGVkZ2VyAAAAAAAABA==",
+        "AAAAAQAAADxGYWRlIGxpc3RpbmcgKFNQRUNfVjIg4oCUIGZpZWxkIG5hbWVzIGFuZCB0eXBlcyBhcmUgc2FjcmVkKS4AAAAAAAAABEZhZGUAAAAOAAAAAAAAAAVhc3NldAAAAAAAABMAAAAAAAAACGNsYWltYW50AAAD6AAAABMAAAAAAAAACmNsYWltZWRfYXQAAAAAA+gAAAAEAAAAAAAAAA9kZWFkbGluZV9sZWRnZXIAAAAABAAAAAAAAAALZmxvb3JfcHJpY2UAAAAACwAAAAAAAAAOaGFuZG9mZl93aW5kb3cAAAAAAAQAAAAAAAAAA3BvdAAAAAALAAAAAAAAAAZzZWxsZXIAAAAAABMAAAAAAAAACXNsb3BlX2RlbgAAAAAAAAsAAAAAAAAACXNsb3BlX251bQAAAAAAAAsAAAAAAAAADHN0YXJ0X2xlZGdlcgAAAAQAAAAAAAAAC3N0YXJ0X3ByaWNlAAAAAAsAAAAAAAAABXN0YXRlAAAAAAAABAAAAAAAAAAMdmVudWVfcHVia2V5AAAD7gAAACA=",
+        "AAAABAAAAVZEZWZpbmVkIGVycm9yIGNvZGVzIGluc3RlYWQgb2YgcGFuaWNzIChTUEVDIMKnMy4zIC8gU1BFQ19WMiBydWxlcykuCgpOdW1iZXJpbmc6IHRoZSA4IHYxIGVycm9ycyBrZWVwIHRoZWlyIGRpc2NyaW1pbmFudHM7IHRoZSBuZXcgdjIgdmFyaWFudHMKY29udGludWUgZnJvbSA5LiBEaXNjcmltaW5hbnQgOCBpcyByZXNlcnZlZCAodjEncyBzaWduYXR1cmUtZm9ybWF0IGVycm9yCndhcyBtZXJnZWQgaW50byBgQmFkU2lnbmF0dXJlYCA9IDc6IGEgcHJlaW1hZ2Uva2V5IG1pc21hdGNoIGFuZCBhbgp1bnZlcmlmaWFibGUgcHVia2V5L3NpZ25hdHVyZSBhcmUgYm90aCBjcmVkZW50aWFsIGZhaWx1cmVzKS4AAAAAAAAAAAAFRXJyb3IAAAAAAAALAAAAAAAAAAhOb3RGb3VuZAAAAAEAAAAAAAAADEludmFsaWRTdGF0ZQAAAAIAAAAAAAAADUludmFsaWRBbW91bnQAAAAAAAADAAAAAAAAAAxJbnZhbGlkQ3VydmUAAAAEAAAAAAAAAA5EZWFkbGluZVBhc3NlZAAAAAAABQAAAAAAAAAGTG9ja2VkAAAAAAAGAAAAAAAAAAxCYWRTaWduYXR1cmUAAAAHAAAAAAAAAAtDYXBFeGNlZWRlZAAAAAAJAAAAAAAAAA5NYW5kYXRlRXhwaXJlZAAAAAAACgAAAAAAAAAMVW5hdXRob3JpemVkAAAACwAAAAAAAAAMSW52YWxpZElucHV0AAAADA==",
+        "AAAAAQAAAJ1NYW5kYXRlOiBvbi1jaGFpbiBsaW1pdGVkIGdyYW50IChTUEVDX1YyKS4gVGhlIG93bmVyIGF1dGhvcml6ZXMgYW4gYWdlbnQKa2V5IChlZDI1NTE5KSB0byBjbGFpbSBGYWRlIGxpc3RpbmdzIEZPUiB0aGUgb3duZXI7IHJlY2lwaWVudCBpcyBmaXhlZCB0bwp0aGUgb3duZXIuAAAAAAAAAAAAAAdNYW5kYXRlAAAAAAgAAAAAAAAADGFnZW50X3B1YmtleQAAA+4AAAAgAAAAAAAAAAlkYWlseV9jYXAAAAAAAAALAAAAAAAAAApkYWlseV91c2VkAAAAAAALAAAAAAAAAAptYXhfcGVyX3R4AAAAAAALAAAAAAAAAAVvd25lcgAAAAAAABMAAAAAAAAAB3Jldm9rZWQAAAAAAQAAAAAAAAALdmFsaWRfdW50aWwAAAAABAAAAAAAAAAMd2luZG93X3N0YXJ0AAAABA==",
+        "AAAAAQAAAMtUcmlnZ2VyOiBldmVudCBlc2Nyb3cgKFNQRUNfVjIpLiBGdW5kZXIgbG9ja3MgZnVuZHMgZm9yIGEgYmVuZWZpY2lhcnk7IGFuCmluZGVwZW5kZW50IGF0dGVzdGVyJ3MgZWQyNTUxOSBzaWduYXR1cmUgZXhlY3V0ZXMgdGhlIHBheW91dDsgYWZ0ZXIgdGhlCmRlYWRsaW5lIGEgcnVsZS1iYXNlZCByZWZ1bmQgcmV0dXJucyBmdW5kcyB0byB0aGUgZnVuZGVyLgAAAAAAAAAAB1RyaWdnZXIAAAAABwAAAAAAAAAGYW1vdW50AAAAAAALAAAAAAAAAAVhc3NldAAAAAAAABMAAAAAAAAAD2F0dGVzdGVyX3B1YmtleQAAAAPuAAAAIAAAAAAAAAALYmVuZWZpY2lhcnkAAAAAEwAAAAAAAAAPZGVhZGxpbmVfbGVkZ2VyAAAAAAQAAAAAAAAABmZ1bmRlcgAAAAAAEwAAAAAAAAAFc3RhdGUAAAAAAAAE",
+        "AAAAAAAAADFvcGVuIC0+IGNsYWltZWQ7IGNsYWltYW50IGF1dGhvcml6YXRpb24gcmVxdWlyZWQuAAAAAAAABWNsYWltAAAAAAAAAgAAAAAAAAAHZmFkZV9pZAAAAAAGAAAAAAAAAAhjbGFpbWFudAAAABMAAAABAAAD6QAAAAIAAAAD",
+        "AAAAAAAAAIdBdHRlc3RlciBzaWduYXR1cmUgcGF5bG9hZDogdHJpZ2dlcl9pZCg4QiBCRSkgfHwgYmVuZWZpY2lhcnkgWERSIHx8CnRzKDhCIEJFKS4gVmFsaWQgc2lnICYmIGxlZGdlciA8PSBkZWFkbGluZSAtPiBwYXlzIHRoZSBiZW5lZmljaWFyeS4AAAAABmF0dGVzdAAAAAAAAwAAAAAAAAAKdHJpZ2dlcl9pZAAAAAAABgAAAAAAAAACdHMAAAAAAAYAAAAAAAAAA3NpZwAAAAPuAAAAQAAAAAEAAAPpAAAAAgAAAAM=",
+        "AAAAAAAAAJ9SdWxlLWJhc2VkIHJlZnVuZDogaWYgdGhlIGRlYWRsaW5lIHBhc3NlZCAobm8gY2xhaW0pIG9yIHRoZQpoYW5kb2ZmX3dpbmRvdyBlbGFwc2VkIChubyBoYW5kb2ZmKSwgdGhlIHBvdCByZXR1cm5zIHRvIHRoZSBzZWxsZXIuCk5vIGRpc2NyZXRpb247IGFueW9uZSBtYXkgY2FsbC4AAAAABnJlZnVuZAAAAAAAAQAAAAAAAAAHZmFkZV9pZAAAAAAGAAAAAQAAA+kAAAACAAAAAw==",
+        "AAAAAAAAAB1WaWV3OiByZXR1cm5zIHRoZSBwb2QgcmVjb3JkLgAAAAAAAAdnZXRfcG9kAAAAAAEAAAAAAAAABnBvZF9pZAAAAAAABgAAAAEAAAPpAAAH0AAAAANQb2QAAAAAAw==",
+        "AAAAAAAAAB5WaWV3OiByZXR1cm5zIHRoZSBmYWRlIHJlY29yZC4AAAAAAAhnZXRfZmFkZQAAAAEAAAAAAAAAB2ZhZGVfaWQAAAAABgAAAAEAAAPpAAAH0AAAAARGYWRlAAAAAw==",
+        "AAAAAAAAAI1zaGEyNTYocHJlaW1hZ2UpPT1rZXlfaGFzaCAmJiBsZWRnZXI+PXVubG9ja19sZWRnZXI7IHJlY2lwaWVudCBtdXN0CmF1dGhvcml6ZSB0aGUgdHJhbnNhY3Rpb24gKGZyb250LXJ1bm5pbmcgcHJvdGVjdGlvbiDigJQgZmluYWwgcmV2aWV3IEYyKS4AAAAAAAAJY2xhaW1fcG9kAAAAAAAAAwAAAAAAAAAGcG9kX2lkAAAAAAAGAAAAAAAAAAhwcmVpbWFnZQAAAA4AAAAAAAAACXJlY2lwaWVudAAAAAAAABMAAAABAAAD6QAAAAIAAAAD",
+        "AAAAAAAAAAAAAAAKY3JlYXRlX3BvZAAAAAAABQAAAAAAAAAGZnVuZGVyAAAAAAATAAAAAAAAAAVhc3NldAAAAAAAABMAAAAAAAAABmFtb3VudAAAAAAACwAAAAAAAAANdW5sb2NrX2xlZGdlcgAAAAAAAAQAAAAAAAAACGtleV9oYXNoAAAD7gAAACAAAAABAAAD6QAAAAYAAAAD",
+        "AAAAAAAAADJWaWV3OiBjdXJyZW50IGRlY2xpbmluZyBwcmljZTsgc3RvcHMgYXQgdGhlIGZsb29yLgAAAAAACmZhZGVfcHJpY2UAAAAAAAEAAAAAAAAAB2ZhZGVfaWQAAAAABgAAAAEAAAAL",
+        "AAAAAAAAAAAAAAALY3JlYXRlX2ZhZGUAAAAACgAAAAAAAAAGc2VsbGVyAAAAAAATAAAAAAAAAAVhc3NldAAAAAAAABMAAAAAAAAAA3BvdAAAAAALAAAAAAAAAAtzdGFydF9wcmljZQAAAAALAAAAAAAAAAtmbG9vcl9wcmljZQAAAAALAAAAAAAAAAlzbG9wZV9udW0AAAAAAAALAAAAAAAAAAlzbG9wZV9kZW4AAAAAAAALAAAAAAAAABBkdXJhdGlvbl9sZWRnZXJzAAAABAAAAAAAAAAOaGFuZG9mZl93aW5kb3cAAAAAAAQAAAAAAAAADHZlbnVlX3B1YmtleQAAA+4AAAAgAAAAAQAAA+kAAAAGAAAAAw==",
+        "AAAAAAAAAM1BZ2VudCBzaWduYXR1cmUgcGF5bG9hZDogbWFuZGF0ZV9pZCg4QiBCRSkgfHwgZmFkZV9pZCg4QiBCRSkgfHwKdHMoOEIgQkUpLiBFbmZvcmNlczogbGVkZ2VyIDw9IHZhbGlkX3VudGlsLCBwcmljZSA8PSBtYXhfcGVyX3R4LApkYWlseV91c2VkICsgcHJpY2UgPD0gZGFpbHlfY2FwLCB0aGVuIGNsYWltcyB0aGUgZmFkZSB3aXRoCmNsYWltYW50ID0gb3duZXIuAAAAAAAAC2Vudm95X2NsYWltAAAAAAQAAAAAAAAACm1hbmRhdGVfaWQAAAAAAAYAAAAAAAAAB2ZhZGVfaWQAAAAABgAAAAAAAAACdHMAAAAAAAYAAAAAAAAACWFnZW50X3NpZwAAAAAAA+4AAABAAAAAAQAAA+kAAAACAAAAAw==",
+        "AAAAAAAAACFWaWV3OiByZXR1cm5zIHRoZSBtYW5kYXRlIHJlY29yZC4AAAAAAAALZ2V0X21hbmRhdGUAAAAAAQAAAAAAAAAKbWFuZGF0ZV9pZAAAAAAABgAAAAEAAAPpAAAH0AAAAAdNYW5kYXRlAAAAAAM=",
+        "AAAAAAAAACFWaWV3OiByZXR1cm5zIHRoZSB0cmlnZ2VyIHJlY29yZC4AAAAAAAALZ2V0X3RyaWdnZXIAAAAAAQAAAAAAAAAKdHJpZ2dlcl9pZAAAAAAABgAAAAEAAAPpAAAH0AAAAAdUcmlnZ2VyAAAAAAM=",
+        "AAAAAAAAAGRHcmFudHMgYW4gYWdlbnQga2V5IHRoZSByaWdodCB0byBjbGFpbSBGYWRlIGxpc3RpbmdzIGZvciB0aGUgb3duZXIuClJlY2lwaWVudCBpcyBmaXhlZCB0byB0aGUgb3duZXIuAAAADmNyZWF0ZV9tYW5kYXRlAAAAAAAFAAAAAAAAAAVvd25lcgAAAAAAABMAAAAAAAAADGFnZW50X3B1YmtleQAAA+4AAAAgAAAAAAAAAAptYXhfcGVyX3R4AAAAAAALAAAAAAAAAAlkYWlseV9jYXAAAAAAAAALAAAAAAAAAAt2YWxpZF91bnRpbAAAAAAEAAAAAQAAA+kAAAAGAAAAAw==",
+        "AAAAAAAAAAAAAAAOY3JlYXRlX3RyaWdnZXIAAAAAAAYAAAAAAAAABmZ1bmRlcgAAAAAAEwAAAAAAAAAFYXNzZXQAAAAAAAATAAAAAAAAAAZhbW91bnQAAAAAAAsAAAAAAAAAC2JlbmVmaWNpYXJ5AAAAABMAAAAAAAAAD2F0dGVzdGVyX3B1YmtleQAAAAPuAAAAIAAAAAAAAAAPZGVhZGxpbmVfbGVkZ2VyAAAAAAQAAAABAAAD6QAAAAYAAAAD",
+        "AAAAAAAAAGxsZWRnZXIgPiBkZWFkbGluZSAmJiBub3QgYXR0ZXN0ZWQgLT4gZnVuZHMgcmV0dXJuIHRvIHRoZSBmdW5kZXIuClJ1bGUtYmFzZWQsIG5vIGRpc2NyZXRpb247IGFueW9uZSBtYXkgY2FsbC4AAAAOcmVmdW5kX3RyaWdnZXIAAAAAAAEAAAAAAAAACnRyaWdnZXJfaWQAAAAAAAYAAAABAAAD6QAAAAYAAAAD",
+        "AAAAAAAAAB9JbnN0YW50IHJldm9jYXRpb24sIG93bmVyIG9ubHkuAAAAAA5yZXZva2VfbWFuZGF0ZQAAAAAAAgAAAAAAAAAFb3duZXIAAAAAAAATAAAAAAAAAAptYW5kYXRlX2lkAAAAAAAGAAAAAQAAA+kAAAACAAAAAw==",
+        "AAAAAAAAAIlWZXJpZmllcyB0aGUgdmVudWUgZWQyNTUxOSBzaWduYXR1cmUKKHBheWxvYWQ6IGZhZGVfaWQoOEIgQkUpIHx8IGNsYWltYW50IFhEUiB8fCB0cyg4QiBCRSkpOyBzZXR0bGVzIGF0IHRoZQpwcmljZSBmcm96ZW4gYXQgYGNsYWltZWRfYXRgLgAAAAAAAA9jb25maXJtX2hhbmRvZmYAAAAAAwAAAAAAAAAHZmFkZV9pZAAAAAAGAAAAAAAAAAJ0cwAAAAAABgAAAAAAAAADc2lnAAAAA+4AAABAAAAAAQAAA+kAAAACAAAAAw==" ]),
       options
     )
   }
   public readonly fromJSON = {
-    iade: this.txFromJSON<Result<void>>,
-        claim: this.txFromJSON<Result<void>>,
-        price_at: this.txFromJSON<i128>,
-        get_capsule: this.txFromJSON<Result<Capsule>>,
-        get_listing: this.txFromJSON<Result<Listing>>,
-        claim_capsule: this.txFromJSON<Result<void>>,
-        confirm_pickup: this.txFromJSON<Result<void>>,
-        create_capsule: this.txFromJSON<Result<u64>>,
-        create_listing: this.txFromJSON<Result<u64>>
+    claim: this.txFromJSON<Result<void>>,
+        attest: this.txFromJSON<Result<void>>,
+        refund: this.txFromJSON<Result<void>>,
+        get_pod: this.txFromJSON<Result<Pod>>,
+        get_fade: this.txFromJSON<Result<Fade>>,
+        claim_pod: this.txFromJSON<Result<void>>,
+        create_pod: this.txFromJSON<Result<u64>>,
+        fade_price: this.txFromJSON<i128>,
+        create_fade: this.txFromJSON<Result<u64>>,
+        envoy_claim: this.txFromJSON<Result<void>>,
+        get_mandate: this.txFromJSON<Result<Mandate>>,
+        get_trigger: this.txFromJSON<Result<Trigger>>,
+        create_mandate: this.txFromJSON<Result<u64>>,
+        create_trigger: this.txFromJSON<Result<u64>>,
+        refund_trigger: this.txFromJSON<Result<void>>,
+        revoke_mandate: this.txFromJSON<Result<void>>,
+        confirm_handoff: this.txFromJSON<Result<void>>
   }
 }
