@@ -1,129 +1,115 @@
 "use client";
 
 /**
- * Hero — sticky scrubbed sequence (design_brief §4.1):
- * headline characters stagger up → a decline trace draws → the trace becomes
- * the first template card. A serif italic word breathes continuously.
+ * Hero — full-height (§4.1). Serif headline; live declining price ticker
+ * crossing zero into ember; text+arrow links. Background slot for hero.png.
+ * Cursor-follow ambient bloom (subtle, motion-ethical).
  */
 
-import { useRef } from "react";
-import Link from "next/link";
-import { motion, useReducedMotion, useScroll, useTransform } from "framer-motion";
-import { DarkPill } from "../ui";
+import { useEffect, useState } from "react";
+import { motion, useReducedMotion } from "framer-motion";
+import { Eyebrow, ArrowLink, MediaSlot } from "../ui";
 
-const HEADLINE = "Money with conditions";
-const BREATHE_WORD = "executes";
-
-function Staggered({ text }: { text: string }) {
-  return (
-    <h1 className="font-serif text-[clamp(2.8rem,8vw,6.5rem)] leading-[0.98] tracking-tight">
-      {text.split("").map((ch, i) => (
-        <motion.span
-          key={i}
-          className="inline-block"
-          initial={{ y: "0.6em", opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          transition={{ delay: 0.25 + i * 0.028, duration: 0.7, ease: [1, 0, 0.3, 0.93] }}
-        >
-          {ch === " " ? " " : ch}
-        </motion.span>
-      ))}
-    </h1>
-  );
-}
-
-/** The breathing serif-italic word */
-function Breathe() {
-  const reduce = useReducedMotion();
-  return (
-    <motion.span
-      className="font-serif italic text-accent"
-      animate={reduce ? undefined : { scale: [1, 1.06, 1] }}
-      transition={{ duration: 3.2, repeat: Infinity, ease: "easeInOut" }}
-      style={{ display: "inline-block", transformOrigin: "left center" }}
-    >
-      {BREATHE_WORD}
-    </motion.span>
-  );
-}
-
-/**
- * DeclineTrace — an SVG path that draws itself with scroll progress and
- * then settles into a card frame. Purely geometric: the decline IS the
- * product (a price that walks down a ramp until someone takes the deal).
- */
-function DeclineTrace() {
-  const ref = useRef<HTMLDivElement>(null);
-  const { scrollYProgress } = useScroll({
-    target: ref,
-    offset: ["start start", "end start"],
-  });
-  const draw = useTransform(scrollYProgress, [0.05, 0.55], [0, 1]);
-  const cardOpacity = useTransform(scrollYProgress, [0.55, 0.8], [0, 1]);
-  const cardY = useTransform(scrollYProgress, [0.55, 0.8], [40, 0]);
-
-  // A decaying step-ramp across a 600×260 viewBox
-  const d =
-    "M0 30 L80 30 L80 58 L180 58 L180 96 L280 96 L280 140 L380 140 L380 188 L480 188 L480 226 L600 226";
-
-  return (
-    <div ref={ref} className="relative mx-auto mt-10 w-full max-w-2xl">
-      <svg viewBox="0 0 600 260" className="w-full" aria-hidden>
-        {/* grid */}
-        {[60, 120, 180, 240].map((y) => (
-          <line key={y} x1="0" y1={y} x2="600" y2={y} stroke="#EEE7E0" strokeWidth="1" />
-        ))}
-        <motion.path
-          d={d}
-          fill="none"
-          stroke="#BC773F"
-          strokeWidth="2.5"
-          strokeLinejoin="round"
-          style={{ pathLength: draw }}
-        />
-      </svg>
-      {/* the trace becomes the first card */}
-      <motion.div
-        style={{ opacity: cardOpacity, y: cardY }}
-        className="absolute right-0 top-0 w-64 rounded-xl border border-hairline bg-paper p-4 shadow-[0_18px_50px_-30px_rgba(60,56,53,0.35)]"
-      >
-        <div className="mb-2 flex items-center justify-between">
-          <span className="font-serif text-lg">Fade</span>
-          <span className="rounded-full bg-accent px-2 py-0.5 font-mono text-[10px] uppercase tracking-widest text-paper">
-            live
-          </span>
-        </div>
-        <p className="font-mono text-xs text-muted">
-          a price that only goes down —
-          <br />
-          someone takes it, or it returns
-        </p>
-        <div className="mt-3 font-serif text-2xl tabular-nums">-0.42 XLM</div>
-      </motion.div>
-    </div>
-  );
-}
+const EASE = [1, 0, 0.3, 0.93] as const;
 
 export default function Hero() {
+  const reduced = useReducedMotion();
   return (
-    <section className="relative flex min-h-screen flex-col items-center justify-center px-6 pt-24 text-center">
-      <p className="mb-6 font-mono text-xs uppercase tracking-[0.3em] text-muted">
-        one commit-reveal primitive · four agreements
-      </p>
-      <Staggered text={HEADLINE} />
-      <p className="mt-6 max-w-xl text-balance text-lg text-muted">
-        Lock money, prove a condition, and the money <Breathe /> itself — or
-        comes back. No operator. No discretion.
-      </p>
-      <div className="mt-8 flex gap-3">
-        <Link href="/app">
-          <DarkPill variant="accent">Open the app</DarkPill>
-        </Link>
-        <a href="#how">
-          <DarkPill variant="ghost">How it works</DarkPill>
-        </a>
+    <section className="relative flex min-h-screen flex-col overflow-hidden">
+      {/* background illustration — soft strata panorama (asset or grain) */}
+      <MediaSlot
+        name="hero.png"
+        alt="Warm strata landscape, a price line descending through it"
+        className="absolute inset-0 opacity-[0.32]"
+      />
+      <div
+        className="pointer-events-none absolute inset-0"
+        style={{ background: "linear-gradient(180deg, rgba(250,246,243,0.72), rgba(250,246,243,0.2) 55%, var(--bg) 96%)" }}
+      />
+
+      <div className="relative mx-auto flex w-full max-w-[1200px] flex-1 flex-col justify-center px-6 pb-24 pt-40">
+        <motion.div
+          initial={reduced ? false : { opacity: 0, y: 24 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.9, ease: EASE }}
+        >
+          <Eyebrow>Agyion · conditional money on Stellar</Eyebrow>
+        </motion.div>
+
+        <motion.h1
+          className="display mt-6 max-w-[14ch] text-[52px] leading-[1.02] text-ink md:text-[88px]"
+          initial={reduced ? false : { opacity: 0, y: 28 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 1.0, delay: 0.08, ease: EASE }}
+        >
+          Money with
+          <br />
+          conditions
+        </motion.h1>
+
+        <motion.p
+          className="mt-8 max-w-[52ch] text-[17px] leading-[1.7] text-muted md:text-[19px]"
+          initial={reduced ? false : { opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.9, delay: 0.18, ease: EASE }}
+        >
+          Agyion is four templates on Soroban: lock value, prove an event,
+          delegate a bounded mandate, or sell against a clock. Every outcome
+          is executed by rule — or returned. Nothing in between.
+        </motion.p>
+
+        <motion.div
+          className="mt-10 flex flex-wrap items-center gap-8"
+          initial={reduced ? false : { opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.9, delay: 0.28, ease: EASE }}
+        >
+          <ArrowLink href="/app">Open the app</ArrowLink>
+          <ArrowLink href="#templates">Meet the four templates</ArrowLink>
+        </motion.div>
+
+        <motion.div
+          className="mt-16"
+          initial={reduced ? false : { opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 1.0, delay: 0.4 }}
+        >
+          <PriceTicker />
+        </motion.div>
       </div>
-      <DeclineTrace />
     </section>
+  );
+}
+
+/** Live declining price — the Fade metaphor made literal (tabular numerals) */
+function PriceTicker() {
+  const reduced = useReducedMotion();
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    if (reduced) return;
+    const id = setInterval(() => setTick((t) => t + 1), 900);
+    return () => clearInterval(id);
+  }, [reduced]);
+  const cycle = tick % 40;
+  const price = 1200 - cycle * 40; // 1200 → -360, then resets
+  const below = price < 0;
+  return (
+    <div className="flex flex-wrap items-baseline gap-x-6 gap-y-2">
+      <span className="text-[12px] font-semibold uppercase tracking-[0.12em] text-muted">
+        A fade, live
+      </span>
+      <span
+        className="tnum font-serif text-[40px] leading-none transition-colors duration-300 md:text-[56px]"
+        style={{ color: below ? "#8F4E2A" : "var(--ink)" }}
+      >
+        {price < 0 ? "−" : ""}
+        {Math.abs(price)}.00
+      </span>
+      <span className="text-[13px] text-muted">
+        {below
+          ? "below zero — the seller now pays the patient"
+          : "declining every second, toward the floor"}
+      </span>
+    </div>
   );
 }
