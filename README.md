@@ -184,6 +184,29 @@ Honest scope beats an inflated demo. Read **[docs/LIMITATIONS.md](docs/LIMITATIO
 - **Multi-hop offline value transfer.** Today: single-hop offline claim proofs (prepare in airplane mode, submit when online). Multi-hop bearer transfer returns when the regulatory frame matures.
 - **CAP-71-ready authorization** and Protocol 25 (BN254/Poseidon) native ZK claims as the network enables them.
 
+## Legal & Compliance (Türkiye-first)
+
+> Engineering summary, not legal advice. Testnet only — no real value moves. Each vertical (marketplace escrow, family law, inheritance) requires jurisdiction-specific counsel before mainnet.
+
+**What Agyion is — and is not.** Non-custodial software: funds sit in contracts under deterministic rules; the team never holds keys or funds. Not a KVHS — per **SPK Tebliğ III-35/B.2 Md. 24/2**, wallet services where the investor holds full private-key control are not custody services. This is enforced in code: no team key in admin multisig, clawback scoped to unclaimed balances only, every freeze carries a user `contest()` veto. Broader control would reclassify the product (unlicensed custody: **6362 SPK Md. 109/A**, 3–5 years). Not a payment institution or e-money issuer (**6493 s. Kanun**, technical-service analysis per **Md. 12/2-ğ**); bearer instruments are deliberately excluded.
+
+**The TCMB payment ban (RG 31456, 16.04.2021, Md. 3–4)** forbids using crypto assets in payments, directly or indirectly. Agyion flows are built so **merchants only ever see TRY**: conversion and settlement are separated — `TRY in (licensed rail/anchor) → conditional contract → anchor → TRY out to merchant bank`. In the hackathon this rail is the official **TR mock anchor** (testnet).
+
+**Dark by default, accountable under lawful process:**
+
+| Layer | Mechanism | Legal anchor |
+|---|---|---|
+| Identity | KYC at anchor (SEP-12), chain pseudonymous | **MASAK Tedbirler Yön. Md. 24/A** (RG 32763): 15.000 TL threshold; self-hosted wallets = declaration regime |
+| Amounts | Confidential; auditor channel per transfer (view-only) | **KVKK 6698** data-minimization |
+| Un-blocking | **M-of-N threshold de-anonymization** (Shamir: anchor + trustee + committee); shares combine only under court order, scoped to one transaction | FATF R16 on the VASP side |
+| Freeze | M-of-N + 72h public queue + user `contest()` veto | capability-without-unilateral-power (cf. **US GENIUS Act**, Pub. L. 119-27) |
+
+**Template notes:** Fade — dynamic pricing is legal; **Fiyat Etiketi Yön. Md. 11** display rules apply; consumer withdrawal (**6502 Md. 48**) in roadmap. Trigger — private conditional contracts under **TBK Md. 26–27**. Pod — conditional gift/emanet; unknown-recipient capsules fit **TBK 583** (public reward). Envoy — the agent is an instrument (**TBK Md. 26 + Md. 116**), mandates are signed and exportable.
+
+**Deliberately excluded:** multi-hop bearer banknotes (closest to e-money under 6493; direct contact with the TCMB ban — roadmap only), liquidity provision (we integrate licensed pools; we are not an LP), FX-as-a-service (licensed anchors only).
+
+**Roadmap to mainnet:** closed-loop pilot (**6493 Md. 12** limited-network analysis) → licensed anchor/e-money partnership → per-vertical legal review → **ETBİS / 6563** intermediary analysis (pending counsel) → trademark scan.
+
 ## License
 
 MIT (see LICENSE). Kernel contract: immutable once deployed; the frontend is replicable by anyone.
