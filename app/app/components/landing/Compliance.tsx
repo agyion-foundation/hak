@@ -1,86 +1,83 @@
 "use client";
 
 /**
- * Compliance — trust metrics (§4.4). Terracotta numerals rise into place
- * (clip + translate). 1px rules between numbers; no cards.
+ * Compliance — two-column asymmetric (§4.5): plain-language paragraphs left,
+ * a ledger-style mono table of visible vs. sealed right. Quiet, no badges.
  */
 
-import { useEffect, useRef, useState } from "react";
-import { motion, useInView, useReducedMotion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import { Eyebrow } from "../ui";
 
-const EASE = [1, 0, 0.3, 0.93] as const;
-
-const METRICS = [
-  { value: 4, suffix: "", label: "templates, one contract", decimals: 0 },
-  { value: 100, suffix: "%", label: "non-custodial settlement", decimals: 0 },
-  { value: 0, suffix: "", label: "operator keys holding funds", decimals: 0 },
-  { value: 21, suffix: "", label: "contract test scenarios", decimals: 0 },
-] as const;
-
-function CountUp({ to, suffix, decimals, run }: { to: number; suffix: string; decimals: number; run: boolean }) {
-  const [v, setV] = useState(0);
-  const reduced = useReducedMotion();
-  useEffect(() => {
-    if (!run) return;
-    if (reduced) {
-      setV(to);
-      return;
-    }
-    const start = performance.now();
-    const dur = 1400;
-    let raf = 0;
-    const step = (now: number) => {
-      const t = Math.min(1, (now - start) / dur);
-      const eased = 1 - Math.pow(1 - t, 3);
-      setV(to * eased);
-      if (t < 1) raf = requestAnimationFrame(step);
-    };
-    raf = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(raf);
-  }, [run, to, reduced]);
-  return (
-    <span className="tnum font-serif text-[64px] leading-none md:text-[88px]" style={{ color: "var(--accent)" }}>
-      {v.toFixed(decimals)}
-      {suffix}
-    </span>
-  );
-}
+const ROWS: [string, string, string][] = [
+  ["Rule parameters", "visible", "amounts, deadlines, caps, curve"],
+  ["State transitions", "visible", "lock → claim → execute / return"],
+  ["Signatures", "visible", "ed25519 proofs, verifiable by anyone"],
+  ["Counterparty identity", "sealed", "addresses only; KYC hooks at the edges"],
+  ["Pod preimage", "sealed", "sha256 hash on-chain; the secret never is"],
+  ["Agent scope", "visible", "mandate limits are public by design"],
+];
 
 export default function Compliance() {
-  const ref = useRef<HTMLDivElement>(null);
-  const inView = useInView(ref, { once: true, margin: "-20%" });
   const reduced = useReducedMotion();
-
   return (
-    <section id="compliance" ref={ref} className="mx-auto max-w-[1200px] px-6 py-28 md:py-40">
-      <Eyebrow>Trust, stated plainly</Eyebrow>
-      <h2 className="display mt-4 max-w-[18ch] text-[36px] leading-[1.1] text-ink md:text-[56px]">
-        The rules are the product
-      </h2>
+    <section id="compliance" className="mx-auto max-w-[1200px] px-6 py-28 md:py-40">
+      <div className="grid grid-cols-1 gap-14 md:grid-cols-12">
+        <div className="md:col-span-5">
+          <Eyebrow>Compliance &amp; privacy</Eyebrow>
+          <h2 className="display mt-4 text-[36px] leading-[1.1] text-ink md:text-[56px]">
+            Auditable where it matters, sealed where it counts
+          </h2>
+          <div className="mt-8 space-y-5 text-[17px] leading-[1.65] text-muted">
+            <p>
+              Every rule is a public parameter. Amounts, deadlines, decay curves,
+              spending caps — anyone can read them, anyone can audit that the
+              contract did exactly what it said. That is the point of putting
+              conditions on-chain.
+            </p>
+            <p>
+              Identity stays at the edges. KYC hooks and jurisdictional gates
+              belong to the on-ramps and venues that touch fiat — the contract
+              itself sees addresses and signatures, nothing more.
+            </p>
+            <p>
+              Secrets stay secret by construction. A Pod stores only the hash
+              of its key; the preimage that opens it never touches the chain
+              until the moment of opening.
+            </p>
+          </div>
+        </div>
 
-      <div className="mt-16 grid grid-cols-2 md:grid-cols-4">
-        {METRICS.map((m, i) => (
+        <div className="md:col-span-7">
           <motion.div
-            key={m.label}
-            className="border-l px-6 py-2 first:border-l-0 md:px-10"
+            className="overflow-hidden rounded-xl border bg-cream"
             style={{ borderColor: "var(--hairline)" }}
-            initial={reduced ? false : { opacity: 0, y: 18 }}
-            animate={inView ? { opacity: 1, y: 0 } : undefined}
-            transition={{ duration: 0.7, delay: i * 0.1, ease: EASE }}
+            initial={reduced ? false : { opacity: 0, y: 20 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true, margin: "-80px" }}
+            transition={{ duration: 0.6, ease: [1, 0, 0.3, 0.93] }}
           >
-            <CountUp to={m.value} suffix={m.suffix} decimals={m.decimals} run={inView} />
-            <div className="mt-3 text-[13px] leading-[1.5] text-muted">{m.label}</div>
+            <div className="border-b px-6 py-4 text-[12px] font-semibold uppercase tracking-[0.12em] text-muted" style={{ borderColor: "var(--hairline)" }}>
+              What the chain sees
+            </div>
+            <table className="w-full font-mono text-[13px]">
+              <tbody>
+                {ROWS.map(([what, state, note]) => (
+                  <tr key={what} className="ledger-row">
+                    <td className="px-6 py-3.5 text-ink">{what}</td>
+                    <td
+                      className="px-4 py-3.5 text-[11px] font-semibold uppercase tracking-[0.1em]"
+                      style={{ color: state === "visible" ? "#6B7256" : "var(--accent)" }}
+                    >
+                      {state}
+                    </td>
+                    <td className="px-6 py-3.5 text-muted">{note}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </motion.div>
-        ))}
+        </div>
       </div>
-
-      <p className="mt-14 max-w-[62ch] text-[15px] leading-[1.7] text-muted">
-        No admin key can move locked funds. Refund paths are rule-based and
-        callable by anyone. Mandates are capped per transaction, per day, per
-        claim count — and revocable in one click. Defined error codes, never
-        panics.
-      </p>
     </section>
   );
 }

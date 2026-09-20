@@ -1,83 +1,68 @@
 "use client";
 
 /**
- * CtaFooter — dark umber footer with the single slow strip (§4.6).
- * Serif CTA over the dark field; one filled terracotta button; the strip is
- * the only marquee allowed (pauses on hover, off with reduced motion).
+ * CtaFooter — serif headline + single terracotta arrow-link, then a footer
+ * with the one slow auto-scrolling strip of template illustrations
+ * (pause on hover) and a colophon (§4.6).
  */
 
 import { motion, useReducedMotion } from "framer-motion";
-import { FilledButton, Icon } from "../ui";
+import { ArrowLink, Eyebrow, Icon, MediaSlot } from "../ui";
 
-const EASE = [1, 0, 0.3, 0.93] as const;
-const STRIP = ["fade", "pod", "trigger", "envoy", "lock · prove · execute · return"];
+const STRIP = [
+  { media: "fade.png", alt: "Fade", icon: "fade" as const },
+  { media: "pod.png", alt: "Pod", icon: "pod" as const },
+  { media: "trigger.png", alt: "Trigger", icon: "trigger" as const },
+  { media: "envoy.png", alt: "Envoy", icon: "envoy" as const },
+];
 
 export default function CtaFooter() {
   const reduced = useReducedMotion();
   return (
-    <footer className="grain-dark relative overflow-hidden">
-      <div className="mx-auto max-w-[1200px] px-6 pb-16 pt-28 md:pt-40">
+    <>
+      <section className="mx-auto max-w-[1200px] px-6 py-28 text-center md:py-40">
+        <Eyebrow>Begin</Eyebrow>
         <motion.h2
-          className="display max-w-[16ch] text-[40px] leading-[1.06] md:text-[68px]"
-          style={{ color: "#F3ECE4" }}
-          initial={reduced ? false : { opacity: 0, y: 26 }}
+          className="display mx-auto mt-4 max-w-[16ch] text-[40px] leading-[1.08] text-ink md:text-[64px]"
+          initial={reduced ? false : { opacity: 0, y: 20 }}
           whileInView={{ opacity: 1, y: 0 }}
-          viewport={{ once: true, margin: "-12%" }}
-          transition={{ duration: 0.9, ease: EASE }}
+          viewport={{ once: true, margin: "-80px" }}
+          transition={{ duration: 0.7, ease: [1, 0, 0.3, 0.93] }}
         >
-          Put a condition on it
+          Give your money a condition.
         </motion.h2>
-        <motion.p
-          className="mt-6 max-w-[50ch] text-[16px] leading-[1.7]"
-          style={{ color: "#8E857E" }}
-          initial={reduced ? false : { opacity: 0, y: 16 }}
-          whileInView={{ opacity: 1, y: 0 }}
-          viewport={{ once: true }}
-          transition={{ duration: 0.8, delay: 0.12, ease: EASE }}
-        >
-          Four templates, one contract, zero custody. Open the app and lock
-          your first condition on testnet.
-        </motion.p>
-        <motion.div
-          className="mt-10"
-          initial={reduced ? false : { opacity: 0, y: 14 }}
-          whileInView={{ opacity: 1, y: 0 }}
-          viewport={{ once: true }}
-          transition={{ duration: 0.8, delay: 0.2, ease: EASE }}
-        >
-          <a href="/app">
-            <FilledButton>Open the app →</FilledButton>
-          </a>
-        </motion.div>
-
-        <div
-          className="mt-20 flex flex-wrap items-center justify-between gap-4 border-t pt-8"
-          style={{ borderColor: "rgba(243,236,228,0.12)" }}
-        >
-          <span className="font-serif text-[18px]" style={{ color: "#F3ECE4" }}>
-            Agyion
-          </span>
-          <span className="font-mono text-[12px]" style={{ color: "#8E857E" }}>
-            soroban testnet · SPEC_V2
-          </span>
+        <div className="mt-10 text-[17px]">
+          <ArrowLink href="/app">Open the app</ArrowLink>
         </div>
-      </div>
+      </section>
 
-      {/* the single slow strip */}
-      <div className="border-t py-5" style={{ borderColor: "rgba(243,236,228,0.12)" }}>
-        <div className="strip flex w-max items-center gap-10 whitespace-nowrap px-6">
-          {[...STRIP, ...STRIP, ...STRIP, ...STRIP].map((s, i) => (
-            <span key={i} className="flex items-center gap-3">
-              {["fade", "pod", "trigger", "envoy"].includes(s) ? (
-                <Icon kind={s as "fade" | "pod" | "trigger" | "envoy"} size={16} color="#CF8850" />
-              ) : null}
-              <span className="text-[12px] font-semibold uppercase tracking-[0.16em]" style={{ color: "#8E857E" }}>
-                {s}
-              </span>
-            </span>
-          ))}
+      <footer className="border-t" style={{ borderColor: "var(--hairline)" }}>
+        {/* the single allowed marquee — slow, pauses on hover */}
+        <div className="overflow-hidden py-8" aria-hidden>
+          <div className={`flex w-max gap-8 ${reduced ? "" : "strip"}`}>
+            {[...STRIP, ...STRIP, ...STRIP, ...STRIP].map((s, i) => (
+              <div key={i} className="flex items-center gap-3">
+                <MediaSlot name={s.media} alt={s.alt} className="h-16 w-24 rounded-lg" />
+                <span className="flex items-center gap-2 text-[13px] font-medium text-muted">
+                  <Icon kind={s.icon} size={16} color="var(--muted)" />
+                  {s.alt}
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
-      </div>
-    </footer>
+
+        <div className="mx-auto flex max-w-[1200px] flex-col items-start justify-between gap-4 px-6 pb-10 pt-4 md:flex-row md:items-center">
+          <div className="font-serif text-[18px] text-ink">Agyion</div>
+          <p className="max-w-[52ch] text-[12px] leading-relaxed text-muted">
+            Colophon — DM Serif Display, Inter, IBM Plex Mono. Terracotta, sand,
+            cream, charcoal-brown. Built on Stellar testnet with Soroban; TRYT
+            is a demo token, not legal tender. Mock mode stores nothing but your
+            browser.
+          </p>
+          <div className="font-mono text-[12px] text-muted">lock · wait · prove · execute-or-return</div>
+        </div>
+      </footer>
+    </>
   );
 }
