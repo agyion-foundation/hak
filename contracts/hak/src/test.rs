@@ -1,5 +1,10 @@
-//! SPEC §3.3'teki 6 senaryonun unit testleri.
-//! Token icin soroban_sdk::testutils::StellarAssetContract kullanilir.
+//! Unit tests for SPEC_V2: the 16 v1 scenarios (translated to EN) plus
+//! Trigger x4 (attest success / bad sig / refund after deadline / early
+//! refund reject), Envoy x5 (claim in cap / cap exceeded / expired / revoked
+//! / recipient binding) and one cross-template test (mandate claim settles
+//! into the owner's fade claim correctly).
+//!
+//! Tests use soroban_sdk::testutils::StellarAssetContract as the token.
 
 extern crate std;
 
@@ -10,20 +15,20 @@ use soroban_sdk::{
     token, xdr::ToXdr, Address, Bytes, BytesN, Env,
 };
 
-use crate::{Hak, HakClient, Hata};
+use crate::{Agyion, AgyionClient, Error};
 
-struct Kurulum {
+struct Setup {
     env: Env,
-    client: HakClient<'static>,
+    client: AgyionClient<'static>,
     asset: Address,
     token: token::Client<'static>,
     token_admin: token::StellarAssetClient<'static>,
 }
 
-fn kurulum() -> Kurulum {
+fn setup() -> Setup {
     let env = Env::default();
-    // confirm_pickup icinde claimant->seller odemesi SAC uzerinden non-root
-    // auth gerektirir; gercekte cuzdan auth agacinin tamamini imzalar.
+    // The claimant->seller payment inside confirm_handoff needs non-root SAC
+    // auth; in production the wallet signs the whole auth tree.
     env.mock_all_auths_allowing_non_root_auth();
 
     let admin = Address::generate(&env);
@@ -32,10 +37,10 @@ fn kurulum() -> Kurulum {
     let token = token::Client::new(&env, &asset);
     let token_admin = token::StellarAssetClient::new(&env, &asset);
 
-    let kontrat_id = env.register(Hak, ());
-    let client = HakClient::new(&env, &kontrat_id);
+    let contract_id = env.register(Agyion, ());
+    let client = AgyionClient::new(&env, &contract_id);
 
-    Kurulum {
+    Setup {
         env,
         client,
         asset,
@@ -44,7 +49,7 @@ fn kurulum() -> Kurulum {
     }
 }
 
-/// Test venue anahtari (sabit — deterministik test).
+/// Test venue key (fixed — deterministic tests).
 fn venue() -> SigningKey {
     SigningKey::from_bytes(&[7u8; 32])
 }
@@ -53,11 +58,29 @@ fn venue_pubkey(env: &Env) -> BytesN<32> {
     BytesN::from_array(env, &venue().verifying_key().to_bytes())
 }
 
-/// Kontrattaki payload uretimiyle birebir ayni:
-/// listing_id(8B BE) || claimant(XDR) || ts(8B BE)
-fn imzala(env: &Env, listing_id: u64, claimant: &Address, ts: u64) -> BytesN<64> {
+/// Test attester key for Trigger.
+fn attester() -> SigningKey {
+    SigningKey::from_bytes(&[11u8; 32])
+}
+
+fn attester_pubkey(env: &Env) -> BytesN<32> {
+    BytesN::from_array(env, &attester().verifying_key().to_bytes())
+}
+
+/// Test agent key for Envoy.
+fn agent() -> SigningKey {
+    SigningKey::from_bytes(&[21u8; 32])
+}
+
+fn agent_pubkey(env: &Env) -> BytesN<32> {
+    BytesN::from_array(env, &agent().verifying_key().to_bytes())
+}
+
+/// Identical to the payload built in the contract:
+/// fade_id(8B BE) || claimant(XDR) || ts(8B BE)
+fn sign_handoff(env: &Env, fade_id: u64, claimant: &Address, ts: u64) -> BytesN<64> {
     let mut payload = Bytes::new(env);
-    payload.append(&Bytes::from_array(env, &listing_id.to_be_bytes()));
+    payload.append(&Bytes::from_array(env, &fade_id.to_be_bytes()));
     payload.append(&claimant.to_xdr(env));
     payload.append(&Bytes::from_array(env, &ts.to_be_bytes()));
 
@@ -66,263 +89,290 @@ fn imzala(env: &Env, listing_id: u64, claimant: &Address, ts: u64) -> BytesN<64>
     BytesN::from_array(env, &sig.to_bytes())
 }
 
-fn baslangic_ledger(env: &Env) -> u32 {
+/// Trigger attestation payload: trigger_id(8B BE) || beneficiary(XDR) || ts(8B BE)
+fn sign_attest(env: &Env, trigger_id: u64, beneficiary: &Address, ts: u64) -> BytesN<64> {
+    let mut payload = Bytes::new(env);
+    payload.append(&Bytes::from_array(env, &trigger_id.to_be_bytes()));
+    payload.append(&beneficiary.to_xdr(env));
+    payload.append(&Bytes::from_array(env, &ts.to_be_bytes()));
+
+    let msg: std::vec::Vec<u8> = payload.iter().collect();
+    let sig = attester().sign(&msg);
+    BytesN::from_array(env, &sig.to_bytes())
+}
+
+/// Envoy agent payload: mandate_id(8B BE) || fade_id(8B BE) || ts(8B BE)
+fn sign_envoy(env: &Env, mandate_id: u64, fade_id: u64, ts: u64) -> BytesN<64> {
+    let mut payload = Bytes::new(env);
+    payload.append(&Bytes::from_array(env, &mandate_id.to_be_bytes()));
+    payload.append(&Bytes::from_array(env, &fade_id.to_be_bytes()));
+    payload.append(&Bytes::from_array(env, &ts.to_be_bytes()));
+
+    let msg: std::vec::Vec<u8> = payload.iter().collect();
+    let sig = agent().sign(&msg);
+    BytesN::from_array(env, &sig.to_bytes())
+}
+
+fn start_ledger(env: &Env) -> u32 {
     env.ledger().sequence()
 }
 
-// ---- Senaryo 1: mutlu yol (pozitif fiyat settle) ----
+// ---- Scenario 1: happy path (positive price settle) ----
 #[test]
-fn mutlu_yol_pozitif_fiyat_settle() {
-    let k = kurulum();
-    let seller = Address::generate(&k.env);
-    let claimant = Address::generate(&k.env);
+fn happy_path_positive_price_settle() {
+    let s = setup();
+    let seller = Address::generate(&s.env);
+    let claimant = Address::generate(&s.env);
 
-    k.token_admin.mint(&seller, &1000);
-    k.token_admin.mint(&claimant, &500);
+    s.token_admin.mint(&seller, &1000);
+    s.token_admin.mint(&claimant, &500);
 
-    let id = k.client.create_listing(
-        &seller, &k.asset, &1000, // pot
+    let id = s.client.create_fade(
+        &seller, &s.asset, &1000, // pot
         &200,   // start_price
         &0,     // floor_price
         &1,     // slope_num
-        &1,     // slope_den: ledger basina 1 dusus
+        &1,     // slope_den: 1 decline per ledger
         &100,   // duration_ledgers
-        &10,    // pickup_window
-        &venue_pubkey(&k.env),
+        &10,    // handoff_window
+        &venue_pubkey(&s.env),
     );
     assert_eq!(id, 1);
-    assert_eq!(k.token.balance(&seller), 0); // pot kontrata gecti
-    assert_eq!(k.token.balance(&k.client.address), 1000);
+    assert_eq!(s.token.balance(&seller), 0); // pot moved to the contract
+    assert_eq!(s.token.balance(&s.client.address), 1000);
 
-    // 10 ledger sonra claim: fiyat = 200 - 10 = 190
-    let start = baslangic_ledger(&k.env);
-    k.env.ledger().set_sequence_number(start + 10);
-    assert_eq!(k.client.price_at(&id), 190);
+    // Claim 10 ledgers later: price = 200 - 10 = 190
+    let start = start_ledger(&s.env);
+    s.env.ledger().set_sequence_number(start + 10);
+    assert_eq!(s.client.fade_price(&id), 190);
 
-    k.client.claim(&id, &claimant);
+    s.client.claim(&id, &claimant);
 
-    k.client.confirm_pickup(&id, &12345, &imzala(&k.env, id, &claimant, 12345));
+    s.client
+        .confirm_handoff(&id, &12345, &sign_handoff(&s.env, id, &claimant, 12345));
 
-    // Settle: claimant 190 oder seller'a; pot (1000) de seller'a doner.
-    assert_eq!(k.token.balance(&seller), 1000 + 190);
-    assert_eq!(k.token.balance(&claimant), 500 - 190);
-    assert_eq!(k.token.balance(&k.client.address), 0);
+    // Settle: claimant pays 190 to the seller; the pot (1000) also returns to the seller.
+    assert_eq!(s.token.balance(&seller), 1000 + 190);
+    assert_eq!(s.token.balance(&claimant), 500 - 190);
+    assert_eq!(s.token.balance(&s.client.address), 0);
 }
 
-// ---- Senaryo 2: negatif fiyat settle (pot -> claimant) ----
+// ---- Scenario 2: negative price settle (pot -> claimant) ----
 #[test]
-fn negatif_fiyat_settle_pot_claimant() {
-    let k = kurulum();
-    let seller = Address::generate(&k.env);
-    let claimant = Address::generate(&k.env);
+fn negative_price_settle_pot_to_claimant() {
+    let s = setup();
+    let seller = Address::generate(&s.env);
+    let claimant = Address::generate(&s.env);
 
-    k.token_admin.mint(&seller, &1000);
+    s.token_admin.mint(&seller, &1000);
 
-    let id = k.client.create_listing(
-        &seller, &k.asset, &1000, &100, // start_price
-        &-50,  // floor_price (negatif: kampanya havuzu oder)
-        &2,    // slope_num: ledger basina 2 dusus
-        &1, &100, &10, &venue_pubkey(&k.env),
+    let id = s.client.create_fade(
+        &seller, &s.asset, &1000, &100, // start_price
+        &-50,  // floor_price (negative: the campaign pool pays)
+        &2,    // slope_num: 2 decline per ledger
+        &1, &100, &10, &venue_pubkey(&s.env),
     );
 
-    // 80 ledger sonra: 100 - 160 = -60, floor'da durur -> -50
-    let start = baslangic_ledger(&k.env);
-    k.env.ledger().set_sequence_number(start + 80);
-    assert_eq!(k.client.price_at(&id), -50);
+    // 80 ledgers later: 100 - 160 = -60, stops at the floor -> -50
+    let start = start_ledger(&s.env);
+    s.env.ledger().set_sequence_number(start + 80);
+    assert_eq!(s.client.fade_price(&id), -50);
 
-    k.client.claim(&id, &claimant);
-    k.client.confirm_pickup(&id, &999, &imzala(&k.env, id, &claimant, 999));
+    s.client.claim(&id, &claimant);
+    s.client
+        .confirm_handoff(&id, &999, &sign_handoff(&s.env, id, &claimant, 999));
 
-    // Claimant pot'tan 50 telafi alir, kalan 950 seller'a.
-    assert_eq!(k.token.balance(&claimant), 50);
-    assert_eq!(k.token.balance(&seller), 950);
-    assert_eq!(k.token.balance(&k.client.address), 0);
+    // The claimant receives 50 compensation from the pot, the remaining 950 goes to the seller.
+    assert_eq!(s.token.balance(&claimant), 50);
+    assert_eq!(s.token.balance(&seller), 950);
+    assert_eq!(s.token.balance(&s.client.address), 0);
 }
 
-// ---- Senaryo 3: iade (deadline gecti, claim yok) ----
+// ---- Scenario 3: refund (deadline passed, no claim) ----
 #[test]
-fn iade_deadline() {
-    let k = kurulum();
-    let seller = Address::generate(&k.env);
+fn refund_after_deadline() {
+    let s = setup();
+    let seller = Address::generate(&s.env);
 
-    k.token_admin.mint(&seller, &700);
+    s.token_admin.mint(&seller, &700);
 
-    let id = k.client.create_listing(
-        &seller, &k.asset, &700, &100, &0, &1, &1, &100, &10, &venue_pubkey(&k.env),
+    let id = s.client.create_fade(
+        &seller, &s.asset, &700, &100, &0, &1, &1, &100, &10, &venue_pubkey(&s.env),
     );
-    assert_eq!(k.token.balance(&seller), 0);
+    assert_eq!(s.token.balance(&seller), 0);
 
-    let start = baslangic_ledger(&k.env);
+    let start = start_ledger(&s.env);
 
-    // Deadline dolmadan iade reddedilir.
-    k.env.ledger().set_sequence_number(start + 100);
-    assert_eq!(k.client.try_iade(&id), Err(Ok(Hata::IadeKosuluYok)));
+    // Refund rejected before the deadline.
+    s.env.ledger().set_sequence_number(start + 100);
+    assert_eq!(s.client.try_refund(&id), Err(Ok(Error::DeadlinePassed)));
 
-    // Deadline gecti: kimse claim etmedi, pot seller'a doner.
-    k.env.ledger().set_sequence_number(start + 101);
-    k.client.iade(&id);
-    assert_eq!(k.token.balance(&seller), 700);
-    assert_eq!(k.token.balance(&k.client.address), 0);
+    // Deadline passed: nobody claimed, the pot returns to the seller.
+    s.env.ledger().set_sequence_number(start + 101);
+    s.client.refund(&id);
+    assert_eq!(s.token.balance(&seller), 700);
+    assert_eq!(s.token.balance(&s.client.address), 0);
 
-    // Ikinci iade: state machine tek yonlu, reddedilir.
-    assert_eq!(k.client.try_iade(&id), Err(Ok(Hata::IadeKosuluYok)));
+    // Second refund: the state machine is single-direction, rejected.
+    assert_eq!(s.client.try_refund(&id), Err(Ok(Error::DeadlinePassed)));
 }
 
-// ---- Senaryo 4: no-show iade (pickup_window doldu, teslim yok) ----
+// ---- Scenario 4: no-show refund (handoff_window elapsed, no handoff) ----
 #[test]
-fn no_show_iade_pickup_window() {
-    let k = kurulum();
-    let seller = Address::generate(&k.env);
-    let claimant = Address::generate(&k.env);
+fn no_show_refund_after_handoff_window() {
+    let s = setup();
+    let seller = Address::generate(&s.env);
+    let claimant = Address::generate(&s.env);
 
-    k.token_admin.mint(&seller, &400);
+    s.token_admin.mint(&seller, &400);
 
-    let id = k.client.create_listing(
-        &seller, &k.asset, &400, &100, &0, &1, &1, &100, &10, &venue_pubkey(&k.env),
+    let id = s.client.create_fade(
+        &seller, &s.asset, &400, &100, &0, &1, &1, &100, &10, &venue_pubkey(&s.env),
     );
 
-    let start = baslangic_ledger(&k.env);
-    k.env.ledger().set_sequence_number(start + 5);
-    k.client.claim(&id, &claimant);
+    let start = start_ledger(&s.env);
+    s.env.ledger().set_sequence_number(start + 5);
+    s.client.claim(&id, &claimant);
 
-    // pickup_window (10) icinde iade reddedilir.
-    k.env.ledger().set_sequence_number(start + 15);
-    assert_eq!(k.client.try_iade(&id), Err(Ok(Hata::IadeKosuluYok)));
+    // Refund rejected within the handoff_window (10).
+    s.env.ledger().set_sequence_number(start + 15);
+    assert_eq!(s.client.try_refund(&id), Err(Ok(Error::DeadlinePassed)));
 
-    // Pencere doldu: claimed_at + pickup_window gecildi -> iade.
-    k.env.ledger().set_sequence_number(start + 16);
-    k.client.iade(&id);
-    assert_eq!(k.token.balance(&seller), 400);
+    // Window elapsed: claimed_at + handoff_window passed -> refund.
+    s.env.ledger().set_sequence_number(start + 16);
+    s.client.refund(&id);
+    assert_eq!(s.token.balance(&seller), 400);
 }
 
-// ---- Senaryo 5: kapsul (erken claim reddi + zamaninda acilis + yanlis preimage reddi) ----
+// ---- Scenario 5: pod (early claim reject + timely open + wrong preimage reject) ----
 #[test]
-fn kapsul_erken_yanlis_ve_zamaninda() {
-    let k = kurulum();
-    let funder = Address::generate(&k.env);
-    let recipient = Address::generate(&k.env);
+fn pod_early_wrong_and_timely_claim() {
+    let s = setup();
+    let funder = Address::generate(&s.env);
+    let recipient = Address::generate(&s.env);
 
-    k.token_admin.mint(&funder, &800);
+    s.token_admin.mint(&funder, &800);
 
-    let preimage = Bytes::from_slice(&k.env, b"hak-gizli-anahtar");
-    let dogru_hash: [u8; 32] = Sha256::digest(b"hak-gizli-anahtar").into();
-    let key_hash = BytesN::from_array(&k.env, &dogru_hash);
+    let preimage = Bytes::from_slice(&s.env, b"agyion-secret-key");
+    let correct_hash: [u8; 32] = Sha256::digest(b"agyion-secret-key").into();
+    let key_hash = BytesN::from_array(&s.env, &correct_hash);
 
-    let unlock = baslangic_ledger(&k.env) + 50;
-    let id = k
+    let unlock = start_ledger(&s.env) + 50;
+    let id = s
         .client
-        .create_capsule(&funder, &k.asset, &800, &unlock, &key_hash);
+        .create_pod(&funder, &s.asset, &800, &unlock, &key_hash);
     assert_eq!(id, 1);
-    assert_eq!(k.token.balance(&funder), 0);
+    assert_eq!(s.token.balance(&funder), 0);
 
-    // Erken claim reddi: unlock_ledger dolmadi.
+    // Early claim rejected: unlock_ledger not reached.
     assert_eq!(
-        k.client.try_claim_capsule(&id, &preimage, &recipient),
-        Err(Ok(Hata::KapsulKilitli))
+        s.client.try_claim_pod(&id, &preimage, &recipient),
+        Err(Ok(Error::Locked))
     );
 
-    // Zamaninda ama yanlis preimage reddi.
-    k.env.ledger().set_sequence_number(unlock);
-    let yanlis = Bytes::from_slice(&k.env, b"yanlis-anahtar");
+    // Timely but wrong preimage rejected.
+    s.env.ledger().set_sequence_number(unlock);
+    let wrong = Bytes::from_slice(&s.env, b"wrong-key");
     assert_eq!(
-        k.client.try_claim_capsule(&id, &yanlis, &recipient),
-        Err(Ok(Hata::AnahtarUyusmadi))
+        s.client.try_claim_pod(&id, &wrong, &recipient),
+        Err(Ok(Error::BadSignature))
     );
 
-    // Zamaninda + dogru preimage: acilir, fon recipient'a gider.
-    k.client.claim_capsule(&id, &preimage, &recipient);
-    assert_eq!(k.token.balance(&recipient), 800);
-    assert_eq!(k.token.balance(&k.client.address), 0);
+    // Timely + correct preimage: opens, funds go to the recipient.
+    s.client.claim_pod(&id, &preimage, &recipient);
+    assert_eq!(s.token.balance(&recipient), 800);
+    assert_eq!(s.token.balance(&s.client.address), 0);
 
-    // Tekrar acilamaz: state machine tek yonlu.
+    // Cannot open twice: the state machine is single-direction.
     assert_eq!(
-        k.client.try_claim_capsule(&id, &preimage, &recipient),
-        Err(Ok(Hata::DurumUygunDegil))
+        s.client.try_claim_pod(&id, &preimage, &recipient),
+        Err(Ok(Error::InvalidState))
     );
 }
 
-// ---- SPEC'e ek: get_listing / get_capsule view'lari ----
+// ---- Views: get_fade / get_pod ----
 #[test]
-fn get_listing_view_kayit_ve_yokluk() {
-    let k = kurulum();
-    let seller = Address::generate(&k.env);
-    k.token_admin.mint(&seller, &1000);
+fn get_fade_view_record_and_missing() {
+    let s = setup();
+    let seller = Address::generate(&s.env);
+    s.token_admin.mint(&seller, &1000);
 
-    let id = k.client.create_listing(
-        &seller, &k.asset, &1000, &200, &-50, &1, &1, &100, &10, &venue_pubkey(&k.env),
+    let id = s.client.create_fade(
+        &seller, &s.asset, &1000, &200, &-50, &1, &1, &100, &10, &venue_pubkey(&s.env),
     );
 
-    let l = k.client.get_listing(&id);
-    assert_eq!(l.seller, seller);
-    assert_eq!(l.asset, k.asset);
-    assert_eq!(l.pot, 1000);
-    assert_eq!(l.start_price, 200);
-    assert_eq!(l.floor_price, -50);
-    assert_eq!(l.state, 0);
-    assert_eq!(l.claimant, None);
-    assert_eq!(l.claimed_at, None);
-    assert_eq!(l.venue_pubkey, venue_pubkey(&k.env));
-    assert_eq!(l.deadline_ledger, l.start_ledger + 100);
+    let f = s.client.get_fade(&id);
+    assert_eq!(f.seller, seller);
+    assert_eq!(f.asset, s.asset);
+    assert_eq!(f.pot, 1000);
+    assert_eq!(f.start_price, 200);
+    assert_eq!(f.floor_price, -50);
+    assert_eq!(f.state, 0);
+    assert_eq!(f.claimant, None);
+    assert_eq!(f.claimed_at, None);
+    assert_eq!(f.venue_pubkey, venue_pubkey(&s.env));
+    assert_eq!(f.deadline_ledger, f.start_ledger + 100);
 
-    // Claim sonrasi kayit guncel gorunur.
-    let claimant = Address::generate(&k.env);
-    k.client.claim(&id, &claimant);
-    let l2 = k.client.get_listing(&id);
-    assert_eq!(l2.state, 1);
-    assert_eq!(l2.claimant, Some(claimant));
+    // The record reflects the claim.
+    let claimant = Address::generate(&s.env);
+    s.client.claim(&id, &claimant);
+    let f2 = s.client.get_fade(&id);
+    assert_eq!(f2.state, 1);
+    assert_eq!(f2.claimant, Some(claimant));
 
-    // Olmayan ilan: tanimli hata, panic yok.
-    assert_eq!(k.client.try_get_listing(&999).unwrap_err(), Ok(Hata::Bulunamadi));
+    // Missing fade: defined error, no panic.
+    assert_eq!(s.client.try_get_fade(&999).unwrap_err(), Ok(Error::NotFound));
 }
 
 #[test]
-fn get_capsule_view_kayit_ve_yokluk() {
-    let k = kurulum();
-    let funder = Address::generate(&k.env);
-    k.token_admin.mint(&funder, &800);
+fn get_pod_view_record_and_missing() {
+    let s = setup();
+    let funder = Address::generate(&s.env);
+    s.token_admin.mint(&funder, &800);
 
-    let key_hash = BytesN::from_array(&k.env, &[9u8; 32]);
-    let id = k.client.create_capsule(&funder, &k.asset, &800, &500, &key_hash);
+    let key_hash = BytesN::from_array(&s.env, &[9u8; 32]);
+    let id = s.client.create_pod(&funder, &s.asset, &800, &500, &key_hash);
 
-    let c = k.client.get_capsule(&id);
-    assert_eq!(c.funder, funder);
-    assert_eq!(c.amount, 800);
-    assert_eq!(c.unlock_ledger, 500);
-    assert_eq!(c.key_hash, key_hash);
-    assert_eq!(c.state, 0);
+    let p = s.client.get_pod(&id);
+    assert_eq!(p.funder, funder);
+    assert_eq!(p.amount, 800);
+    assert_eq!(p.unlock_ledger, 500);
+    assert_eq!(p.key_hash, key_hash);
+    assert_eq!(p.state, 0);
 
-    assert_eq!(k.client.try_get_capsule(&999).unwrap_err(), Ok(Hata::Bulunamadi));
+    assert_eq!(s.client.try_get_pod(&999).unwrap_err(), Ok(Error::NotFound));
 }
 
-// ---- SPEC'e ek: TS venueSigner parity — JS (stellar-sdk) tarafinda uretilen
-// imzanin kontratin ed25519_verify yolunda dogrulanmasi. Fixture degerleri
-// app/lib/venueSigner.ts ile ayni mantigi kullanan bir node script'inden
-// uretildi (venue seed [7u8;32], claimant seed [9u8;32], listing_id=1, ts=12345).
+// ---- TS venueSigner parity — a signature produced on the JS side
+// (stellar-sdk) must verify on the contract's ed25519_verify path. Fixture
+// values were generated with a node script using the same logic as
+// app/lib/venueSigner.ts (venue seed [7u8;32], claimant seed [9u8;32],
+// fade_id=1, ts=12345).
 #[test]
-fn venue_imza_ts_parity() {
+fn venue_sig_ts_parity() {
     let env = Env::default();
     let claimant = Address::from_string(&soroban_sdk::String::from_str(
         &env,
         "GD6ROJBYLKQMOW3E7N4M2YBPUHMZD7PL65VRHRMO24BOVSBV5H3BQRSL",
     ));
 
-    // Payload kontrattaki gibi kurulur: listing_id(8B BE) || claimant(XDR) || ts(8B BE)
+    // Payload built as in the contract: fade_id(8B BE) || claimant(XDR) || ts(8B BE)
     let mut payload = Bytes::new(&env);
     payload.append(&Bytes::from_array(&env, &1u64.to_be_bytes()));
     payload.append(&claimant.to_xdr(&env));
     payload.append(&Bytes::from_array(&env, &12345u64.to_be_bytes()));
 
-    // TS tarafinin urettigi byte'larla birebir ayni olmali
-    let beklenen_payload: [u8; 60] = [
+    // Must match the bytes produced by the TS side exactly
+    let expected_payload: [u8; 60] = [
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0xfd, 0x17, 0x24, 0x38, 0x5a, 0xa0, 0xc7, 0x5b, 0x64, 0xfb,
         0x78, 0xcd, 0x60, 0x2f, 0xa1, 0xd9, 0x91, 0xfd, 0xeb, 0xf7, 0x6b, 0x13, 0xc5, 0x8e, 0xd7,
         0x02, 0xea, 0xc8, 0x35, 0xe9, 0xf6, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x39,
     ];
-    let uretilen: std::vec::Vec<u8> = payload.iter().collect();
-    assert_eq!(uretilen, beklenen_payload.to_vec());
+    let produced: std::vec::Vec<u8> = payload.iter().collect();
+    assert_eq!(produced, expected_payload.to_vec());
 
-    // TS tarafinda imzalanan imza kontrat dogrulamasindan gecmeli (panic yok = OK)
+    // The signature produced by the TS side must pass contract verification (no panic = OK)
     let sig_hex = "318bd92969d100cffd5a72daf3f8a5433cdf1fe16b1de89cf76f2e3176aa0780eeff53f8217adefd43499f16abe3a3e684d4d5f2461d0c8fc219d1c8883ff001";
     let mut sig_bytes = [0u8; 64];
     for i in 0..64 {
@@ -335,102 +385,105 @@ fn venue_imza_ts_parity() {
     );
 }
 
-// ---- Senaryo 6: ayni-ledger cift claim (ikincisi reddedilir) ----
+// ---- Scenario 6: same-ledger double claim (second is rejected) ----
 #[test]
-fn ayni_ledger_cift_claim() {
-    let k = kurulum();
-    let seller = Address::generate(&k.env);
-    let c1 = Address::generate(&k.env);
-    let c2 = Address::generate(&k.env);
+fn same_ledger_double_claim() {
+    let s = setup();
+    let seller = Address::generate(&s.env);
+    let c1 = Address::generate(&s.env);
+    let c2 = Address::generate(&s.env);
 
-    k.token_admin.mint(&seller, &300);
+    s.token_admin.mint(&seller, &300);
 
-    let id = k.client.create_listing(
-        &seller, &k.asset, &300, &100, &0, &1, &1, &100, &10, &venue_pubkey(&k.env),
+    let id = s.client.create_fade(
+        &seller, &s.asset, &300, &100, &0, &1, &1, &100, &10, &venue_pubkey(&s.env),
     );
 
-    // Ayni ledger'da iki claim: ilk gecerli gecis kazanir.
-    k.client.claim(&id, &c1);
+    // Two claims in the same ledger: the first valid transition wins.
+    s.client.claim(&id, &c1);
     assert_eq!(
-        k.client.try_claim(&id, &c2),
-        Err(Ok(Hata::DurumUygunDegil))
+        s.client.try_claim(&id, &c2),
+        Err(Ok(Error::InvalidState))
     );
 
-    // Kazanan c1: teslim settle'i c1 uzerinden yapilir.
-    k.token_admin.mint(&c1, &500);
-    k.client.confirm_pickup(&id, &77, &imzala(&k.env, id, &c1, 77));
-    assert_eq!(k.token.balance(&k.client.address), 0);
+    // Winner c1: the handoff settle runs over c1.
+    s.token_admin.mint(&c1, &500);
+    s.client
+        .confirm_handoff(&id, &77, &sign_handoff(&s.env, id, &c1, 77));
+    assert_eq!(s.token.balance(&s.client.address), 0);
 }
 
-// ---- ORTA-1: floor_price alt sinir validasyonu + settle cap'i ----
+// ---- floor_price lower-bound validation + settle cap ----
 #[test]
-fn asiri_negatif_floor_reddi() {
-    let k = kurulum();
-    let seller = Address::generate(&k.env);
-    k.token_admin.mint(&seller, &1000);
+fn excessive_negative_floor_rejected() {
+    let s = setup();
+    let seller = Address::generate(&s.env);
+    s.token_admin.mint(&seller, &1000);
 
-    // floor < -pot: negatif odeme pot'u asabilirdi -> MiktarGecersiz.
+    // floor < -pot: the negative payout could exceed the pot -> InvalidAmount.
     assert_eq!(
-        k.client.try_create_listing(
-            &seller, &k.asset, &100, &50, &-101, &1, &1, &100, &10, &venue_pubkey(&k.env),
+        s.client.try_create_fade(
+            &seller, &s.asset, &100, &50, &-101, &1, &1, &100, &10, &venue_pubkey(&s.env),
         ),
-        Err(Ok(Hata::MiktarGecersiz))
+        Err(Ok(Error::InvalidAmount))
     );
-    // Asiri deger de reddedilir (i128 negasyon tasmasi vektoru kapali).
+    // Extreme values are rejected too (i128 negation overflow vector closed).
     assert_eq!(
-        k.client.try_create_listing(
-            &seller, &k.asset, &100, &50, &i128::MIN, &1, &1, &100, &10, &venue_pubkey(&k.env),
+        s.client.try_create_fade(
+            &seller, &s.asset, &100, &50, &i128::MIN, &1, &1, &100, &10, &venue_pubkey(&s.env),
         ),
-        Err(Ok(Hata::MiktarGecersiz))
+        Err(Ok(Error::InvalidAmount))
     );
-    // Sinir deger floor == -pot kabul edilir.
-    let id = k.client.create_listing(
-        &seller, &k.asset, &100, &50, &-100, &1, &1, &100, &10, &venue_pubkey(&k.env),
+    // Boundary value floor == -pot is accepted.
+    let id = s.client.create_fade(
+        &seller, &s.asset, &100, &50, &-100, &1, &1, &100, &10, &venue_pubkey(&s.env),
     );
     assert_eq!(id, 1);
 }
 
 #[test]
-fn negatif_fiyat_pot_cap_settle() {
-    let k = kurulum();
-    let seller = Address::generate(&k.env);
-    let claimant = Address::generate(&k.env);
-    k.token_admin.mint(&seller, &500);
+fn negative_price_pot_cap_settle() {
+    let s = setup();
+    let seller = Address::generate(&s.env);
+    let claimant = Address::generate(&s.env);
+    s.token_admin.mint(&seller, &500);
 
-    // floor == -pot: fiyat floor'a indiginde negatif odeme tam pot'a oturur
-    // (cap sinir degeri). |fiyat| > pot durumu create validasyonuyla kapali.
-    let id = k.client.create_listing(
-        &seller, &k.asset, &500, &0, // start_price
+    // floor == -pot: when the price hits the floor the negative payout sits
+    // exactly on the pot (cap boundary). |price| > pot is closed by create
+    // validation.
+    let id = s.client.create_fade(
+        &seller, &s.asset, &500, &0, // start_price
         &-500, // floor_price == -pot
         &10,   // slope_num
-        &1, &100, &10, &venue_pubkey(&k.env),
+        &1, &100, &10, &venue_pubkey(&s.env),
     );
 
-    let start = baslangic_ledger(&k.env);
-    k.env.ledger().set_sequence_number(start + 60);
-    assert_eq!(k.client.price_at(&id), -500); // floor'da durdu
+    let start = start_ledger(&s.env);
+    s.env.ledger().set_sequence_number(start + 60);
+    assert_eq!(s.client.fade_price(&id), -500); // stopped at the floor
 
-    k.client.claim(&id, &claimant);
-    k.client.confirm_pickup(&id, &42, &imzala(&k.env, id, &claimant, 42));
+    s.client.claim(&id, &claimant);
+    s.client
+        .confirm_handoff(&id, &42, &sign_handoff(&s.env, id, &claimant, 42));
 
-    // Cap: claimant tam pot'u (500) alir, seller'a kalan 0.
-    assert_eq!(k.token.balance(&claimant), 500);
-    assert_eq!(k.token.balance(&seller), 0);
-    assert_eq!(k.token.balance(&k.client.address), 0);
+    // Cap: the claimant receives the full pot (500), the seller gets 0.
+    assert_eq!(s.token.balance(&claimant), 500);
+    assert_eq!(s.token.balance(&seller), 0);
+    assert_eq!(s.token.balance(&s.client.address), 0);
 }
 
-// ---- ORTA-2: imza hatalari ----
+// ---- signature errors ----
 #[test]
-fn sifir_venue_pubkey_reddi() {
-    let k = kurulum();
-    let seller = Address::generate(&k.env);
-    k.token_admin.mint(&seller, &100);
+fn zero_venue_pubkey_rejected() {
+    let s = setup();
+    let seller = Address::generate(&s.env);
+    s.token_admin.mint(&seller, &100);
 
-    // Sifir pubkey: hicbir imza dogrulanamaz, confirm yolu kilitlenirdi.
+    // Zero pubkey: no signature can ever verify, the confirm path would be locked.
     assert_eq!(
-        k.client.try_create_listing(
+        s.client.try_create_fade(
             &seller,
-            &k.asset,
+            &s.asset,
             &100,
             &50,
             &0,
@@ -438,112 +491,502 @@ fn sifir_venue_pubkey_reddi() {
             &1,
             &100,
             &10,
-            &BytesN::from_array(&k.env, &[0u8; 32]),
+            &BytesN::from_array(&s.env, &[0u8; 32]),
         ),
-        Err(Ok(Hata::ImzaGecersiz))
+        Err(Ok(Error::BadSignature))
     );
 }
 
-/// Gecersiz (baska anahtarla uretilmis) imza: soroban host `ed25519_verify`
-/// basarisiz dogrulamada Result degil host trap'i (panic) uretir; bu dal
-/// kontrat ici Hata koduna cevrilemez. Test, trap davranisini should_panic
-/// ile belgeler. Fon kaybi yok: tx atomik geri alinir, seller iade'ye duser.
-/// (Frontend venueSigner.ts imzayi gondermeden once on-dogrular — savunma
-/// derinligi.)
+/// Invalid (signed with a different key) signature: the soroban host
+/// `ed25519_verify` produces a host trap (panic) on failed verification, not
+/// a Result; that branch cannot be converted into an in-contract Error code.
+/// The test documents the trap behavior with should_panic. No funds are lost:
+/// the tx rolls back atomically and the seller can fall back to refund.
+/// (The frontend venueSigner.ts pre-verifies before submitting — defense in
+/// depth.)
 #[test]
 #[should_panic]
-fn gecersiz_imza_host_trapi() {
-    let k = kurulum();
-    let seller = Address::generate(&k.env);
-    let claimant = Address::generate(&k.env);
-    k.token_admin.mint(&seller, &400);
+fn invalid_sig_host_trap() {
+    let s = setup();
+    let seller = Address::generate(&s.env);
+    let claimant = Address::generate(&s.env);
+    s.token_admin.mint(&seller, &400);
 
-    let id = k.client.create_listing(
-        &seller, &k.asset, &400, &100, &0, &1, &1, &100, &10, &venue_pubkey(&k.env),
+    let id = s.client.create_fade(
+        &seller, &s.asset, &400, &100, &0, &1, &1, &100, &10, &venue_pubkey(&s.env),
     );
-    k.client.claim(&id, &claimant);
+    s.client.claim(&id, &claimant);
 
-    // Baska bir anahtarla imzalanmis gecerli-formatli 64B imza -> host trap.
-    let baska = SigningKey::from_bytes(&[13u8; 32]);
-    let mut payload = Bytes::new(&k.env);
-    payload.append(&Bytes::from_array(&k.env, &id.to_be_bytes()));
-    payload.append(&claimant.to_xdr(&k.env));
-    payload.append(&Bytes::from_array(&k.env, &55u64.to_be_bytes()));
+    // Well-formed 64B signature produced with a different key -> host trap.
+    let other = SigningKey::from_bytes(&[13u8; 32]);
+    let mut payload = Bytes::new(&s.env);
+    payload.append(&Bytes::from_array(&s.env, &id.to_be_bytes()));
+    payload.append(&claimant.to_xdr(&s.env));
+    payload.append(&Bytes::from_array(&s.env, &55u64.to_be_bytes()));
     let msg: std::vec::Vec<u8> = payload.iter().collect();
-    let sig = baska.sign(&msg);
+    let sig = other.sign(&msg);
 
-    k.client
-        .confirm_pickup(&id, &55, &BytesN::from_array(&k.env, &sig.to_bytes()));
+    s.client
+        .confirm_handoff(&id, &55, &BytesN::from_array(&s.env, &sig.to_bytes()));
 }
 
-// ---- ORTA-3: confirm/iade pencere yarisi kapatildi ----
+// ---- confirm/refund window race closed ----
 #[test]
-fn pencere_sonrasi_confirm_reddi_iade_kazanir() {
-    let k = kurulum();
-    let seller = Address::generate(&k.env);
-    let claimant = Address::generate(&k.env);
-    k.token_admin.mint(&seller, &400);
-    k.token_admin.mint(&claimant, &500);
+fn confirm_after_window_rejected_refund_wins() {
+    let s = setup();
+    let seller = Address::generate(&s.env);
+    let claimant = Address::generate(&s.env);
+    s.token_admin.mint(&seller, &400);
+    s.token_admin.mint(&claimant, &500);
 
-    let id = k.client.create_listing(
-        &seller, &k.asset, &400, &100, &0, &1, &1, &100, &10, &venue_pubkey(&k.env),
+    let id = s.client.create_fade(
+        &seller, &s.asset, &400, &100, &0, &1, &1, &100, &10, &venue_pubkey(&s.env),
     );
 
-    let start = baslangic_ledger(&k.env);
-    k.env.ledger().set_sequence_number(start + 5);
-    k.client.claim(&id, &claimant); // claimed_at = start + 5, window = 10
+    let start = start_ledger(&s.env);
+    s.env.ledger().set_sequence_number(start + 5);
+    s.client.claim(&id, &claimant); // claimed_at = start + 5, window = 10
 
-    // Pencere doldu (start+16 > start+5+10): elinde gecerli imza olsa bile
-    // confirm artik DurumUygunDegil — no-show'da iade kazanir.
-    k.env.ledger().set_sequence_number(start + 16);
+    // Window elapsed (start+16 > start+5+10): even with a valid signature,
+    // confirm is now InvalidState — on a no-show, refund wins.
+    s.env.ledger().set_sequence_number(start + 16);
     assert_eq!(
-        k.client
-            .try_confirm_pickup(&id, &88, &imzala(&k.env, id, &claimant, 88)),
-        Err(Ok(Hata::DurumUygunDegil))
+        s.client
+            .try_confirm_handoff(&id, &88, &sign_handoff(&s.env, id, &claimant, 88)),
+        Err(Ok(Error::InvalidState))
     );
 
-    // Sinir ledger'i (claimed_at + window) confirm'e hala acik iken bu test
-    // reddi dogruladi; simdi iade seller'a pot'u dondurur.
-    k.client.iade(&id);
-    assert_eq!(k.token.balance(&seller), 400);
-    assert_eq!(k.token.balance(&claimant), 500); // claimant'a bir sey gecmedi
+    // Refund now returns the pot to the seller.
+    s.client.refund(&id);
+    assert_eq!(s.token.balance(&seller), 400);
+    assert_eq!(s.token.balance(&claimant), 500); // nothing moved to the claimant
 }
 
 #[test]
-fn pencere_sinir_ledgerinda_confirm_gecerli() {
-    let k = kurulum();
-    let seller = Address::generate(&k.env);
-    let claimant = Address::generate(&k.env);
-    k.token_admin.mint(&seller, &400);
-    k.token_admin.mint(&claimant, &500);
+fn confirm_valid_at_window_boundary() {
+    let s = setup();
+    let seller = Address::generate(&s.env);
+    let claimant = Address::generate(&s.env);
+    s.token_admin.mint(&seller, &400);
+    s.token_admin.mint(&claimant, &500);
 
-    let id = k.client.create_listing(
-        &seller, &k.asset, &400, &100, &0, &1, &1, &100, &10, &venue_pubkey(&k.env),
+    let id = s.client.create_fade(
+        &seller, &s.asset, &400, &100, &0, &1, &1, &100, &10, &venue_pubkey(&s.env),
     );
 
-    let start = baslangic_ledger(&k.env);
-    k.env.ledger().set_sequence_number(start + 5);
-    k.client.claim(&id, &claimant);
+    let start = start_ledger(&s.env);
+    s.env.ledger().set_sequence_number(start + 5);
+    s.client.claim(&id, &claimant);
 
-    // Tam sinir: simdi == claimed_at + pickup_window -> confirm serbest
-    // (iade kosulu `>` oldugundan sinir ledger'inda confirm oncelikli).
-    k.env.ledger().set_sequence_number(start + 15);
-    k.client
-        .confirm_pickup(&id, &91, &imzala(&k.env, id, &claimant, 91));
-    assert_eq!(k.token.balance(&k.client.address), 0);
+    // Exact boundary: now == claimed_at + handoff_window -> confirm is still
+    // allowed (the refund condition is `>`, so confirm has priority at the
+    // boundary ledger).
+    s.env.ledger().set_sequence_number(start + 15);
+    s.client
+        .confirm_handoff(&id, &91, &sign_handoff(&s.env, id, &claimant, 91));
+    assert_eq!(s.token.balance(&s.client.address), 0);
 }
 
-// ---- DUSUK-3: pickup_window=0 reddi ----
+// ---- handoff_window=0 rejection ----
 #[test]
-fn pickup_window_sifir_reddi() {
-    let k = kurulum();
-    let seller = Address::generate(&k.env);
-    k.token_admin.mint(&seller, &100);
+fn zero_handoff_window_rejected() {
+    let s = setup();
+    let seller = Address::generate(&s.env);
+    s.token_admin.mint(&seller, &100);
 
     assert_eq!(
-        k.client.try_create_listing(
-            &seller, &k.asset, &100, &50, &0, &1, &1, &100, &0, &venue_pubkey(&k.env),
+        s.client.try_create_fade(
+            &seller, &s.asset, &100, &50, &0, &1, &1, &100, &0, &venue_pubkey(&s.env),
         ),
-        Err(Ok(Hata::EgitimGecersiz))
+        Err(Ok(Error::InvalidCurve))
     );
+}
+
+// =====================================================================
+// TRIGGER (SPEC_V2): attest success / bad sig / refund after deadline /
+// early refund reject
+// =====================================================================
+
+#[test]
+fn trigger_attest_success() {
+    let s = setup();
+    let funder = Address::generate(&s.env);
+    let beneficiary = Address::generate(&s.env);
+    s.token_admin.mint(&funder, &500);
+
+    let deadline = start_ledger(&s.env) + 50;
+    let id = s.client.create_trigger(
+        &funder,
+        &s.asset,
+        &500,
+        &beneficiary,
+        &attester_pubkey(&s.env),
+        &deadline,
+    );
+    assert_eq!(id, 1);
+    assert_eq!(s.token.balance(&funder), 0);
+    assert_eq!(s.token.balance(&s.client.address), 500);
+
+    let t = s.client.get_trigger(&id);
+    assert_eq!(t.funder, funder);
+    assert_eq!(t.beneficiary, beneficiary);
+    assert_eq!(t.amount, 500);
+    assert_eq!(t.deadline_ledger, deadline);
+    assert_eq!(t.state, 0);
+
+    // Valid attestation within the deadline pays the beneficiary.
+    s.client
+        .attest(&id, &777, &sign_attest(&s.env, id, &beneficiary, 777));
+    assert_eq!(s.token.balance(&beneficiary), 500);
+    assert_eq!(s.token.balance(&s.client.address), 0);
+    assert_eq!(s.client.get_trigger(&id).state, 1);
+
+    // Single-direction: a second attest and a refund are both rejected.
+    assert_eq!(
+        s.client
+            .try_attest(&id, &778, &sign_attest(&s.env, id, &beneficiary, 778)),
+        Err(Ok(Error::InvalidState))
+    );
+    s.env.ledger().set_sequence_number(deadline + 1);
+    assert_eq!(
+        s.client.try_refund_trigger(&id),
+        Err(Ok(Error::InvalidState))
+    );
+}
+
+/// Attestation signed by the wrong key: host trap (same documented
+/// `ed25519_verify` behavior as confirm_handoff).
+#[test]
+#[should_panic]
+fn trigger_attest_bad_sig_host_trap() {
+    let s = setup();
+    let funder = Address::generate(&s.env);
+    let beneficiary = Address::generate(&s.env);
+    s.token_admin.mint(&funder, &500);
+
+    let deadline = start_ledger(&s.env) + 50;
+    let id = s.client.create_trigger(
+        &funder,
+        &s.asset,
+        &500,
+        &beneficiary,
+        &attester_pubkey(&s.env),
+        &deadline,
+    );
+
+    let other = SigningKey::from_bytes(&[13u8; 32]);
+    let mut payload = Bytes::new(&s.env);
+    payload.append(&Bytes::from_array(&s.env, &id.to_be_bytes()));
+    payload.append(&beneficiary.to_xdr(&s.env));
+    payload.append(&Bytes::from_array(&s.env, &1u64.to_be_bytes()));
+    let msg: std::vec::Vec<u8> = payload.iter().collect();
+    let sig = other.sign(&msg);
+
+    s.client
+        .attest(&id, &1, &BytesN::from_array(&s.env, &sig.to_bytes()));
+}
+
+#[test]
+fn trigger_refund_after_deadline() {
+    let s = setup();
+    let funder = Address::generate(&s.env);
+    let beneficiary = Address::generate(&s.env);
+    s.token_admin.mint(&funder, &500);
+
+    let deadline = start_ledger(&s.env) + 50;
+    let id = s.client.create_trigger(
+        &funder,
+        &s.asset,
+        &500,
+        &beneficiary,
+        &attester_pubkey(&s.env),
+        &deadline,
+    );
+
+    // After the deadline the attestation window is closed...
+    s.env.ledger().set_sequence_number(deadline + 1);
+    assert_eq!(
+        s.client
+            .try_attest(&id, &5, &sign_attest(&s.env, id, &beneficiary, 5)),
+        Err(Ok(Error::DeadlinePassed))
+    );
+
+    // ...and the rule-based refund returns the funds to the funder. No
+    // discretion, anyone may call.
+    s.client.refund_trigger(&id);
+    assert_eq!(s.token.balance(&funder), 500);
+    assert_eq!(s.token.balance(&beneficiary), 0);
+    assert_eq!(s.token.balance(&s.client.address), 0);
+    assert_eq!(s.client.get_trigger(&id).state, 2);
+
+    // Double refund rejected (single-direction state machine).
+    assert_eq!(
+        s.client.try_refund_trigger(&id),
+        Err(Ok(Error::InvalidState))
+    );
+}
+
+#[test]
+fn trigger_early_refund_rejected() {
+    let s = setup();
+    let funder = Address::generate(&s.env);
+    let beneficiary = Address::generate(&s.env);
+    s.token_admin.mint(&funder, &500);
+
+    let deadline = start_ledger(&s.env) + 50;
+    let id = s.client.create_trigger(
+        &funder,
+        &s.asset,
+        &500,
+        &beneficiary,
+        &attester_pubkey(&s.env),
+        &deadline,
+    );
+
+    // Refund before the deadline: rejected — the attestation path is still open.
+    assert_eq!(
+        s.client.try_refund_trigger(&id),
+        Err(Ok(Error::DeadlinePassed))
+    );
+    // Also rejected exactly at the deadline ledger (refund needs `>` deadline).
+    s.env.ledger().set_sequence_number(deadline);
+    assert_eq!(
+        s.client.try_refund_trigger(&id),
+        Err(Ok(Error::DeadlinePassed))
+    );
+
+    // State untouched: attestation still executes afterwards.
+    s.client
+        .attest(&id, &42, &sign_attest(&s.env, id, &beneficiary, 42));
+    assert_eq!(s.token.balance(&beneficiary), 500);
+}
+
+// =====================================================================
+// ENVOY (SPEC_V2): claim in cap / cap exceeded / expired / revoked /
+// recipient binding
+// =====================================================================
+
+/// Creates a negative-price fade (campaign fade): price falls to floor=-50.
+/// Returns (fade_id, owner).
+fn setup_campaign_fade(s: &Setup, seller: &Address) -> u64 {
+    s.token_admin.mint(seller, &1000);
+    s.client.create_fade(
+        seller, &s.asset, &1000, &100, // start_price
+        &-50,  // floor_price
+        &2,    // slope: 2 per ledger -> hits the floor after 75 ledgers
+        &1, &200, &10, &venue_pubkey(&s.env),
+    )
+}
+
+#[test]
+fn envoy_claim_within_cap() {
+    let s = setup();
+    let owner = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+
+    let start = start_ledger(&s.env);
+    let mandate_id = s.client.create_mandate(
+        &owner,
+        &agent_pubkey(&s.env),
+        &100,    // max_per_tx
+        &1000,   // daily_cap
+        &(start + 1000), // valid_until
+    );
+    assert_eq!(mandate_id, 1);
+
+    let fade_id = setup_campaign_fade(&s, &seller);
+
+    // Price at floor: -50 (campaign hunting — the agent catches negative prices).
+    s.env.ledger().set_sequence_number(start + 80);
+    assert_eq!(s.client.fade_price(&fade_id), -50);
+
+    s.client
+        .envoy_claim(&mandate_id, &fade_id, &11, &sign_envoy(&s.env, mandate_id, fade_id, 11));
+
+    let f = s.client.get_fade(&fade_id);
+    assert_eq!(f.state, 1);
+    assert_eq!(f.claimant, Some(owner.clone()));
+
+    // Negative price is free: no budget was consumed.
+    let m = s.client.get_mandate(&mandate_id);
+    assert_eq!(m.daily_used, 0);
+    assert!(!m.revoked);
+}
+
+#[test]
+fn envoy_claim_cap_exceeded() {
+    let s = setup();
+    let owner = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    s.token_admin.mint(&seller, &2000);
+
+    let start = start_ledger(&s.env);
+    let mandate_id = s.client.create_mandate(
+        &owner,
+        &agent_pubkey(&s.env),
+        &100,  // max_per_tx
+        &120,  // daily_cap
+        &(start + 1000),
+    );
+
+    // Constant positive price 150 (slope_num=0): above max_per_tx -> CapExceeded.
+    let fade_over_cap = s.client.create_fade(
+        &seller, &s.asset, &1000, &150, &0, &0, &1, &200, &10, &venue_pubkey(&s.env),
+    );
+    assert_eq!(
+        s.client.try_envoy_claim(
+            &mandate_id,
+            &fade_over_cap,
+            &1,
+            &sign_envoy(&s.env, mandate_id, fade_over_cap, 1),
+        ),
+        Err(Ok(Error::CapExceeded))
+    );
+
+    // Positive price within both caps: passes the cap checks but is rejected
+    // by the Envoy design restriction (no owner auth possible) -> InvalidInput.
+    let fade_in_cap = s.client.create_fade(
+        &seller, &s.asset, &1000, &50, &0, &0, &1, &200, &10, &venue_pubkey(&s.env),
+    );
+    assert_eq!(
+        s.client.try_envoy_claim(
+            &mandate_id,
+            &fade_in_cap,
+            &2,
+            &sign_envoy(&s.env, mandate_id, fade_in_cap, 2),
+        ),
+        Err(Ok(Error::InvalidInput))
+    );
+}
+
+#[test]
+fn envoy_claim_expired_mandate() {
+    let s = setup();
+    let owner = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+
+    let start = start_ledger(&s.env);
+    let mandate_id = s.client.create_mandate(
+        &owner,
+        &agent_pubkey(&s.env),
+        &100,
+        &1000,
+        &(start + 10), // short-lived mandate
+    );
+    let fade_id = setup_campaign_fade(&s, &seller);
+
+    s.env.ledger().set_sequence_number(start + 11); // past valid_until
+    assert_eq!(s.client.fade_price(&fade_id), 78); // price still positive, but
+    // expiry is checked first
+    assert_eq!(
+        s.client.try_envoy_claim(
+            &mandate_id,
+            &fade_id,
+            &3,
+            &sign_envoy(&s.env, mandate_id, fade_id, 3),
+        ),
+        Err(Ok(Error::MandateExpired))
+    );
+}
+
+#[test]
+fn envoy_claim_revoked_mandate() {
+    let s = setup();
+    let owner = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+
+    let start = start_ledger(&s.env);
+    let mandate_id = s.client.create_mandate(
+        &owner,
+        &agent_pubkey(&s.env),
+        &100,
+        &1000,
+        &(start + 1000),
+    );
+    let fade_id = setup_campaign_fade(&s, &seller);
+
+    // A non-owner cannot revoke (param/caller mismatch -> Unauthorized).
+    let stranger = Address::generate(&s.env);
+    assert_eq!(
+        s.client.try_revoke_mandate(&stranger, &mandate_id),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    // Instant revocation by the owner.
+    s.client.revoke_mandate(&owner, &mandate_id);
+    assert!(s.client.get_mandate(&mandate_id).revoked);
+
+    s.env.ledger().set_sequence_number(start + 80); // price at floor (-50)
+    assert_eq!(
+        s.client.try_envoy_claim(
+            &mandate_id,
+            &fade_id,
+            &4,
+            &sign_envoy(&s.env, mandate_id, fade_id, 4),
+        ),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+#[test]
+fn envoy_claim_recipient_binding() {
+    let s = setup();
+    let owner = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+
+    let start = start_ledger(&s.env);
+    let mandate_id = s.client.create_mandate(
+        &owner,
+        &agent_pubkey(&s.env),
+        &100,
+        &1000,
+        &(start + 1000),
+    );
+    let fade_id = setup_campaign_fade(&s, &seller);
+
+    s.env.ledger().set_sequence_number(start + 80);
+    s.client
+        .envoy_claim(&mandate_id, &fade_id, &5, &sign_envoy(&s.env, mandate_id, fade_id, 5));
+
+    // Recipient binding is structural: the claim lands on the mandate owner,
+    // never on the agent (the agent has only a pubkey, no address param).
+    let f = s.client.get_fade(&fade_id);
+    assert_eq!(f.claimant, Some(owner));
+    assert_eq!(f.claimed_at, Some(start + 80));
+}
+
+// ---- Cross-template: a mandate claim settles into the owner's fade claim ----
+#[test]
+fn cross_template_mandate_claim_settles_owner_fade() {
+    let s = setup();
+    let owner = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+
+    let start = start_ledger(&s.env);
+    let mandate_id = s.client.create_mandate(
+        &owner,
+        &agent_pubkey(&s.env),
+        &100,
+        &1000,
+        &(start + 1000),
+    );
+    let fade_id = setup_campaign_fade(&s, &seller);
+
+    // Agent claims at the floor price (-50) on behalf of the owner.
+    s.env.ledger().set_sequence_number(start + 80);
+    s.client
+        .envoy_claim(&mandate_id, &fade_id, &6, &sign_envoy(&s.env, mandate_id, fade_id, 6));
+
+    // The venue confirms the handoff; settle runs with claimant = owner:
+    // the pot compensates the owner with 50, the remaining 950 goes to the seller.
+    s.client.confirm_handoff(
+        &fade_id,
+        &60,
+        &sign_handoff(&s.env, fade_id, &s.client.get_fade(&fade_id).claimant.unwrap(), 60),
+    );
+
+    assert_eq!(s.token.balance(&owner), 50);
+    assert_eq!(s.token.balance(&seller), 950);
+    assert_eq!(s.token.balance(&s.client.address), 0);
+    assert_eq!(s.client.get_fade(&fade_id).state, 2);
 }
