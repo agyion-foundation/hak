@@ -16,6 +16,7 @@ import PodPanel from "./PodPanel";
 import TriggerPanel from "./TriggerPanel";
 import EnvoyPanel from "./EnvoyPanel";
 import LedgerPanel from "./LedgerPanel";
+import RampPanel from "./RampPanel";
 import { Icon } from "../ui";
 
 const TABS = [
@@ -23,6 +24,7 @@ const TABS = [
   { id: "pod", label: "Pod", icon: "pod" as const },
   { id: "trigger", label: "Trigger", icon: "trigger" as const },
   { id: "envoy", label: "Envoy", icon: "envoy" as const },
+  { id: "ramp", label: "On/Off-ramp", icon: null },
   { id: "ledger", label: "Ledger", icon: null },
 ] as const;
 
@@ -117,6 +119,7 @@ export default function AppShell() {
             {tab === "pod" && <PodPanel wallet={wallet} />}
             {tab === "trigger" && <TriggerPanel wallet={wallet} />}
             {tab === "envoy" && <EnvoyPanel wallet={wallet} />}
+            {tab === "ramp" && <RampPanel wallet={wallet} />}
             {tab === "ledger" && <LedgerPanel wallet={wallet} />}
           </motion.div>
         </AnimatePresence>

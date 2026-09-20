@@ -56,7 +56,7 @@ export default function CtaFooter() {
           <div className="font-serif text-[18px] text-ink">Agyion</div>
           <p className="max-w-[52ch] text-[12px] leading-relaxed text-muted">
             Colophon — DM Serif Display, Inter, IBM Plex Mono. Terracotta, sand,
-            cream, charcoal-brown. Built on Stellar testnet with Soroban; TRYT
+            cream, charcoal-brown. Built on Stellar testnet with Soroban; TRY
             is a demo token, not legal tender. Mock mode stores nothing but your
             browser.
           </p>

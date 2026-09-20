@@ -57,19 +57,19 @@ flowchart LR
 
     subgraph Stellar testnet
         KERNEL["contracts/hak — agyion kernel<br/>single contract, generic template IDs T1–T4<br/>lock / claim / refund / attest / mandate"]
-        ASSET["tTRY — representative TRY token<br/>(SAC-compatible, clawback flag OFF)"]
+        ASSET["USDC — Circle testnet issuer<br/>(SAC-compatible, clawback flag OFF)"]
     end
 
     subgraph Fiat side (regulated)
-        ANCHOR["anchor/ — SDF Anchor Platform<br/>SEP-10 / SEP-24, KYC off-chain"]
+        ANCHOR["tr-mock-anchor.fly.dev — official hackathon<br/>TR mock anchor: SEP-10 / SEP-6 / SEP-38,<br/>KYC (SEP-12) off-chain"]
         BANK["Merchant bank account<br/>sees TRY only"]
     end
 
     AGENT["Agent (off-chain, optional)<br/>proposes; the contract disposes"]
 
     APP -- "Soroban RPC" --> KERNEL
-    APP -- "SEP-24 deposit/withdraw" --> ANCHOR
-    ANCHOR -- "1:1 issuance" --> ASSET
+    APP -- "SEP-6 deposit/withdraw (TRY↔USDC)" --> ANCHOR
+    ANCHOR --- ASSET
     ASSET --- KERNEL
     ANCHOR -- "bank rails (simulated on testnet)" --> BANK
     AGENT -- "envoy_claim(mandate_id, fade_id, sig)" --> KERNEL
@@ -88,8 +88,8 @@ Design invariants:
 | Path | Contents |
 |---|---|
 | `contracts/hak/` | Soroban kernel contract (Rust, `soroban-sdk` 28) — Fade, Pod, Trigger, Envoy + 26 unit tests |
-| `app/` | Next.js 14 + TypeScript + Tailwind; mock mode (localStorage) + soroban mode via generated bindings |
-| `anchor/` | Anchor Platform `assets.yaml` (tTRY, SEP-24 enabled) + quick-run notes and known traps |
+| `app/` | Next.js 14 + TypeScript + Tailwind; mock mode (localStorage) + soroban mode via generated bindings; **On/Off-ramp tab** = SEP-10/SEP-6/SEP-38 client for the official TR mock anchor (`app/app/lib/anchor.ts`) |
+| `anchor/` | *Self-host alternative* (not the demo path): Anchor Platform `assets.yaml` (tTRY, SEP-24) + quick-run notes and known traps |
 | `scripts/` | `setup.sh` (toolchain check), `deploy_testnet.sh` (testnet deploy + tTRY issuance) |
 | `docs/` | [PITCH.md](docs/PITCH.md) · [DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) · [LIMITATIONS.md](docs/LIMITATIONS.md) |
 | `SPEC_V2.md` | Binding build spec (contract signatures are sacred) |
@@ -119,12 +119,15 @@ cd app && npm install && npm run dev          # http://localhost:3000
 #   NEXT_PUBLIC_HAK_MODE=soroban
 #   NEXT_PUBLIC_HAK_CONTRACT_ID=<id from step 2>
 #   NEXT_PUBLIC_SOROBAN_RPC_URL=https://soroban-testnet.stellar.org
+# The On/Off-ramp tab works in both modes; it talks to the official hackathon
+# TR mock anchor (SEP-6). Override only if you run your own anchor:
+#   NEXT_PUBLIC_ANCHOR_URL=https://tr-mock-anchor.fly.dev   (default)
 
 # 4) Static export + deploy (Cloudflare Pages)
 npm run build                                 # output: 'export' → app/out
 ```
 
-Optional anchor quick-run (SEP-24 flow, simulated bank leg): see [anchor/README.md](anchor/README.md).
+**Anchor:** the app integrates the official hackathon TR mock anchor (`https://tr-mock-anchor.fly.dev`) — a SEP-6 TRY↔USDC rail with SEP-10 auth, SEP-12 KYC and SEP-38 quotes; the bank leg is simulated by the sandbox. The self-host Anchor Platform quick-run (SEP-24 flow, also simulated) remains as an alternative in [anchor/README.md](anchor/README.md).
 
 ## Test evidence
 
@@ -146,8 +149,8 @@ Built with the official and community Stellar skills, per the hackathon handbook
 
 | Skill | Where it was used |
 |---|---|
-| `skills/anchors` ([stellar-anchor-skill](https://github.com/CheesecakeLabs/stellar-anchor-skill)) | `anchor/` SEP-24 configuration and quick-run; the "13 gotchas" list shaped our memo handling, popup (not iframe) interactive flow, and `/info`-is-the-contract checks |
-| `skills/standards` ([stellar/stellar-dev-skill](https://github.com/stellar/stellar-dev-skill)) | SEP-10/SEP-24/SEP-38 alignment, SAC-compatible asset usage, claimable-balance semantics behind Fade's native reclaim path |
+| `skills/anchors` ([stellar-anchor-skill](https://github.com/CheesecakeLabs/stellar-anchor-skill)) | SEP-10/SEP-6 client integration against the official TR mock anchor (`app/app/lib/anchor.ts`, On/Off-ramp tab); the "13 gotchas" list shaped our memo handling and `/info`-is-the-contract checks; `anchor/` keeps the self-host SEP-24 alternative |
+| `skills/standards` ([stellar/stellar-dev-skill](https://github.com/stellar/stellar-dev-skill)) | SEP-10/SEP-6/SEP-38 alignment, SAC-compatible asset usage, claimable-balance semantics behind Fade's native reclaim path |
 | `skills/zk-proofs` ([stellar/stellar-dev-skill](https://github.com/stellar/stellar-dev-skill)) | ZK roadmap grounding: Protocol 25 "X-Ray" (BN254 + Poseidon host functions) feasibility for agent-less anonymous claims (MVP ships a measured stub — see LIMITATIONS) |
 | `skills/agentic-payments` ([stellar/stellar-dev-skill](https://github.com/stellar/stellar-dev-skill)) | Envoy mandate design: spending caps, TTL, fee-sponsored agent flows, and the smart-account/policy-signer variant of on-chain mandate enforcement |
 

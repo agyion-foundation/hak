@@ -12,9 +12,16 @@ export const CONFIG = {
   networkPassphrase:
     process.env.NEXT_PUBLIC_STELLAR_NETWORK_PASSPHRASE ??
     "Test SDF Network ; September 2015",
-  /** Temsili TRY token (SPEC §2: kendi ihraç ettiğimiz token; USDC bağımlılığı yok) */
-  assetCode: process.env.NEXT_PUBLIC_HAK_ASSET_CODE ?? "TRYT",
-  assetAddress: process.env.NEXT_PUBLIC_HAK_ASSET_ADDRESS ?? "",
+  /**
+   * Ramp asset: USDC on Stellar testnet (Circle testnet issuer), the asset the
+   * official hackathon TR mock anchor ramps against TRY via SEP-6.
+   */
+  assetCode: process.env.NEXT_PUBLIC_HAK_ASSET_CODE ?? "USDC",
+  assetAddress:
+    process.env.NEXT_PUBLIC_HAK_ASSET_ADDRESS ??
+    "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+  /** Official hackathon TR mock anchor (SEP-10 + SEP-6 + SEP-38 + SEP-12) */
+  anchorUrl: process.env.NEXT_PUBLIC_ANCHOR_URL ?? "https://tr-mock-anchor.fly.dev",
   /** stroop-benzeri minor unit: 7 ondalık (SPEC §3.1) */
   decimals: 7,
   /** WalletConnect modülü için Reown/WalletConnect project ID; boşsa modül modal'da listelenmez */
