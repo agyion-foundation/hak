@@ -6,6 +6,15 @@ use soroban_sdk::{token, xdr::ToXdr, Address, Bytes, BytesN, Env};
 
 use crate::{DataKey, Error, Fade, TTL_EXTEND, TTL_THRESHOLD};
 
+/// Upper bound for `duration_ledgers` and `handoff_window` (~58 days at
+/// 5s/ledger). Security audit v2 finding 1: without a bound, a pathological
+/// `handoff_window` (near u32::MAX) could push `claimed_at + handoff_window`
+/// past u32::MAX; the refund path now also uses saturating_add (consistent
+/// with confirm_handoff), and this create-time bound keeps every ledger
+/// arithmetic (`now + duration_ledgers`, `claimed_at + handoff_window`)
+/// far from the overflow edge.
+pub(crate) const MAX_LEDGER_SPAN: u32 = 1_000_000;
+
 pub(crate) fn next_id(env: &Env) -> u64 {
     let key = DataKey::FadeCount;
     let id: u64 = env.storage().instance().get(&key).unwrap_or(0) + 1;
@@ -86,6 +95,12 @@ pub fn create_fade(
     // duration, zero is rejected here (consistent validation).
     if slope_den <= 0 || slope_num < 0 || duration_ledgers == 0 || handoff_window == 0 {
         return Err(Error::InvalidCurve);
+    }
+    // Upper bound (audit v2 finding 1): absurdly large spans serve no
+    // legitimate listing and would bring ledger arithmetic close to the
+    // u32 overflow edge. Rejected with InvalidInput.
+    if duration_ledgers > MAX_LEDGER_SPAN || handoff_window > MAX_LEDGER_SPAN {
+        return Err(Error::InvalidInput);
     }
     // Zero/empty venue pubkey: an ed25519 public key of all zeros can never
     // verify a signature; on such a fade confirm_handoff would always produce
@@ -192,6 +207,11 @@ pub fn confirm_handoff(env: &Env, fade_id: u64, ts: u64, sig: BytesN<64>) -> Res
     }
 
     // Venue ed25519 signature: payload = fade_id(8B BE) || claimant(XDR) || ts(8B BE)
+    // NOTE (ts freshness, audit v2 finding 3): `ts` is committed into the
+    // signed payload but its freshness is NOT enforced on-chain in v1 — a
+    // signature stays valid for the whole handoff_window. Replay within the
+    // window is closed by the state machine (state 1 -> 2 is single-direction;
+    // after the window, refund wins). See docs/LIMITATIONS.md.
     // NOTE: the soroban host `ed25519_verify` does not return a Result on
     // verification failure — it produces a host trap (panic) directly; that
     // branch cannot be converted into an in-contract Error code. The frontend
@@ -249,9 +269,13 @@ pub fn refund(env: &Env, fade_id: u64) -> Result<(), Error> {
         // Deadline passed and no claim ever happened.
         0 => now > fade.deadline_ledger,
         // Claimed but the handoff was not confirmed within the window (no-show).
+        // saturating_add: consistent with confirm_handoff (audit v2 finding 1)
+        // — a pathological handoff_window can never trap the refund path and
+        // lock the pot. The create-time MAX_LEDGER_SPAN bound makes saturation
+        // unreachable in practice; this is defense in depth.
         1 => {
             let claimed_at = fade.claimed_at.ok_or(Error::InvalidState)?;
-            now > claimed_at + fade.handoff_window
+            now > claimed_at.saturating_add(fade.handoff_window)
         }
         _ => false,
     };

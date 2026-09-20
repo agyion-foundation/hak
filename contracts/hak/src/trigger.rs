@@ -56,6 +56,12 @@ pub fn create_trigger(
     if amount <= 0 {
         return Err(Error::InvalidAmount);
     }
+    // A deadline in the past (or the current ledger) would birth a
+    // refund-only escrow; rejected at create time, consistent with
+    // create_mandate's valid_until check (audit v2 finding 4).
+    if deadline_ledger <= env.ledger().sequence() {
+        return Err(Error::InvalidInput);
+    }
     // Zero attester pubkey can never verify a signature: the escrow would be
     // refund-only. Rejected at create time (same rule as Fade's venue key).
     if attester_pubkey == BytesN::from_array(env, &[0u8; 32]) {
@@ -100,6 +106,11 @@ pub fn attest(env: &Env, trigger_id: u64, ts: u64, sig: BytesN<64>) -> Result<()
 
     // Attester ed25519 signature:
     // payload = trigger_id(8B BE) || beneficiary(XDR) || ts(8B BE)
+    // NOTE (ts freshness, audit v2 finding 3): `ts` is payload-bound but its
+    // freshness is NOT enforced on-chain in v1; a signature remains valid
+    // until the deadline. Replay is closed by the state machine (0 -> 1 is
+    // single-direction) and funds can only ever flow to the beneficiary.
+    // See docs/LIMITATIONS.md.
     // NOTE: like confirm_handoff, `ed25519_verify` host-traps on failure
     // instead of returning a Result; that branch cannot become an in-contract
     // Error. The tx rolls back atomically, funds stay locked, and after the

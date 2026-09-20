@@ -104,6 +104,12 @@ pub struct Mandate {
     pub daily_used: i128, // spend accumulated in the current window
     pub window_start: u32, // ledger where the current daily window began
     pub revoked: bool,
+    /// Successful envoy_claim count (audit v2 finding 2). Under the Envoy
+    /// price<=0 restriction the monetary caps (max_per_tx/daily_cap) are
+    /// effectively dead — daily_used always accumulates 0 — so the active
+    /// bound on agent activity is this counter, capped at
+    /// `envoy::MAX_CLAIMS_PER_MANDATE`. Shown on the mandate card in the UI.
+    pub claims_used: u32,
 }
 
 /// Defined error codes instead of panics (SPEC §3.3 / SPEC_V2 rules).

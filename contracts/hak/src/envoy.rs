@@ -1,6 +1,10 @@
 //! Envoy template: on-chain limited mandate. The owner grants an agent key
 //! (ed25519) the right to claim Fade listings FOR the owner, under on-chain
-//! enforced limits (per-tx cap, daily cap, expiry, instant revocation).
+//! enforced limits (per-tx cap, daily cap, per-mandate claim-count cap,
+//! expiry, instant revocation). Note: under the price<=0 restriction below
+//! the monetary caps are effectively dead (daily_used stays 0); the
+//! claim-count cap (MAX_CLAIMS_PER_MANDATE) is the active bound — see
+//! audit v2 finding 2.
 //!
 //! DESIGN DECISION (documented per spec review): `envoy_claim` never calls
 //! `owner.require_auth()`. The mandate itself IS the authorization — the
@@ -23,6 +27,15 @@ use crate::{fade, DataKey, Error, Mandate, TTL_EXTEND, TTL_THRESHOLD};
 /// simple rolling window: `window_start` ledger + `daily_used` accumulation;
 /// when `now - window_start >= LEDGERS_PER_DAY` the window resets.
 pub(crate) const LEDGERS_PER_DAY: u32 = 17_280;
+
+/// Maximum number of successful claims a single mandate may perform
+/// (audit v2 finding 2). Because Envoy claims are restricted to price <= 0
+/// fades, the monetary caps (max_per_tx / daily_cap) can never be exhausted —
+/// `daily_used` only ever accumulates `price.max(0)` = 0 and stays 0. This
+/// claim-count cap is therefore the ACTIVE bound on agent activity: without
+/// it a valid mandate could claim an unlimited number of fades until
+/// valid_until (griefing vector). Exceeding it is rejected with CapExceeded.
+pub(crate) const MAX_CLAIMS_PER_MANDATE: u32 = 50;
 
 pub(crate) fn next_id(env: &Env) -> u64 {
     let key = DataKey::MandateCount;
@@ -91,6 +104,7 @@ pub fn create_mandate(
         daily_used: 0,
         window_start: env.ledger().sequence(),
         revoked: false,
+        claims_used: 0,
     };
 
     let id = next_id(env);
@@ -102,7 +116,8 @@ pub fn create_mandate(
 /// Agent signature payload: mandate_id(8B BE) || fade_id(8B BE) || ts(8B BE).
 ///
 /// Enforcement order (SPEC_V2): not revoked -> not expired -> agent sig ->
-/// price <= max_per_tx -> daily_used + price <= daily_cap -> price <= 0
+/// price <= max_per_tx -> daily_used + price <= daily_cap ->
+/// claims_used < MAX_CLAIMS_PER_MANDATE (audit v2 finding 2) -> price <= 0
 /// (Envoy design restriction, see module docs) -> claim(fade, claimant=owner).
 pub fn envoy_claim(
     env: &Env,
@@ -127,6 +142,11 @@ pub fn envoy_claim(
     // Agent ed25519 signature over mandate_id || fade_id || ts. Same host-trap
     // caveat as confirm_handoff/attest: a bad signature traps the tx
     // atomically; it cannot be mapped to an in-contract Error code.
+    // NOTE (ts freshness, audit v2 finding 3): `ts` is committed into the
+    // payload but freshness is NOT enforced on-chain in v1 — an agent
+    // signature stays valid until valid_until. Replay of the same claim is
+    // closed by the fade state machine (a claimed fade rejects re-claim with
+    // InvalidState). See docs/LIMITATIONS.md.
     let mut payload = Bytes::new(env);
     payload.append(&Bytes::from_array(env, &mandate_id.to_be_bytes()));
     payload.append(&Bytes::from_array(env, &fade_id.to_be_bytes()));
@@ -152,6 +172,14 @@ pub fn envoy_claim(
     if mandate.daily_used.saturating_add(price) > mandate.daily_cap {
         return Err(Error::CapExceeded);
     }
+    // Claim-count cap (audit v2 finding 2): under the price<=0 restriction
+    // below, the monetary caps above are effectively dead (daily_used only
+    // ever accumulates 0), so this counter is the active bound on how many
+    // fades one mandate can claim. Placed with the other cap checks so an
+    // over-cap attempt reports CapExceeded regardless of the price sign.
+    if mandate.claims_used >= MAX_CLAIMS_PER_MANDATE {
+        return Err(Error::CapExceeded);
+    }
 
     // Envoy restriction (see module-level DESIGN DECISION): only price <= 0
     // fades may be claimed through a mandate. Positive-price settle would
@@ -170,7 +198,10 @@ pub fn envoy_claim(
     // Accumulate spend. Only the non-negative part counts against the budget;
     // with the restriction above this is always 0 today, but the update keeps
     // SPEC semantics if positive-price Envoy claims are ever enabled.
+    // (Audit v2 finding 2: the monetary cap is dead code under price<=0 —
+    // daily_used stays 0 — the claim-count cap below is the active limit.)
     mandate.daily_used = mandate.daily_used.saturating_add(price.max(0));
+    mandate.claims_used = mandate.claims_used.saturating_add(1);
     write(env, mandate_id, &mandate);
     Ok(())
 }
