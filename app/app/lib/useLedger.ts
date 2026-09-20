@@ -1,48 +1,50 @@
 "use client";
 
 /**
- * useLedger — ledger polling (SPEC §4: "canlı fiyat saati (ledger polling)")
+ * useLedger — ledger polling (live price clock)
  *
- * Her saniye UI'ı tazeler; ledger tahmini yerel saatle ilerler,
- * her `yenileMs` periyotta client.currentLedger() ile yeniden hizalanır.
+ * The UI re-renders every second; the ledger estimate advances on local time
+ * and re-aligns with client.currentLedger() every `refreshMs`.
+ * The interval pauses when the tab is hidden (motion ethics §3.4).
  */
 
 import { useEffect, useRef, useState } from "react";
-import type { HakClient } from "./hakClient";
-import { SANIYE_PER_LEDGER } from "./istemci";
+import type { AgyionClient } from "./hakClient";
+import { SECONDS_PER_LEDGER } from "./client";
 
-export function useLedger(client: HakClient | null, yenileMs = 10_000): number | null {
+export function useLedger(client: AgyionClient | null, refreshMs = 10_000): number | null {
   const [ledger, setLedger] = useState<number | null>(null);
-  const capa = useRef<{ base: number; at: number } | null>(null);
+  const anchor = useRef<{ base: number; at: number } | null>(null);
 
   useEffect(() => {
     if (!client) return;
-    let canli = true;
+    let live = true;
 
-    const hizala = async () => {
+    const align = async () => {
       try {
-        const g = await client.currentLedger();
-        if (!canli) return;
-        capa.current = { base: g, at: Date.now() };
-        setLedger(g);
+        const l = await client.currentLedger();
+        if (!live) return;
+        anchor.current = { base: l, at: Date.now() };
+        setLedger(l);
       } catch {
-        /* RPC geçici hata — bir sonraki periyotta tekrar */
+        /* transient RPC error — retried next period */
       }
     };
 
-    void hizala();
+    void align();
     const tick = setInterval(() => {
-      const c = capa.current;
-      if (c) setLedger(c.base + Math.floor((Date.now() - c.at) / (SANIYE_PER_LEDGER * 1000)));
+      if (typeof document !== "undefined" && document.hidden) return;
+      const a = anchor.current;
+      if (a) setLedger(a.base + Math.floor((Date.now() - a.at) / (SECONDS_PER_LEDGER * 1000)));
     }, 1000);
-    const sync = setInterval(hizala, yenileMs);
+    const sync = setInterval(align, refreshMs);
 
     return () => {
-      canli = false;
+      live = false;
       clearInterval(tick);
       clearInterval(sync);
     };
-  }, [client, yenileMs]);
+  }, [client, refreshMs]);
 
   return ledger;
 }

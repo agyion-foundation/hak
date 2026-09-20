@@ -1,35 +1,35 @@
 /**
- * wallet.ts — cüzdan soyutlaması (SPEC §4)
+ * wallet.ts — wallet abstraction (SPEC §4)
  *
- * "Cüzdan: Stellar Wallets Kit; yoksa test modunda secret-key alanı (demo notuyla)."
+ * "Wallet: Stellar Wallets Kit; otherwise a secret-key field in test mode
+ * (shown with a demo note)."
  *
- * - TransactionSigner arayüzü (hakClient.ts) cüzdan bağımsızdır.
- * - Wallets Kit bağlandığında bir adapter bu arayüzü implemente edip
- *   registerSigner() ile sisteme takar. Bağlantı noktası hazırdır.
- * - Kit yoksa TestSecretWallet: secret-key alanı, yalnızca testnet/demo.
+ * - The TransactionSigner interface (hakClient.ts) is wallet-agnostic.
+ * - When the Wallets Kit connects, an adapter implements this interface and
+ *   plugs in via registerSigner().
+ * - Without the kit, TestSecretWallet: a secret-key field, testnet/demo only.
  */
 
-import { Keypair } from "@stellar/stellar-sdk";
-import { Transaction } from "@stellar/stellar-sdk";
+import { Keypair, Transaction } from "@stellar/stellar-sdk";
 import type { TransactionSigner } from "./hakClient";
 
-let aktif: TransactionSigner | null = null;
+let active: TransactionSigner | null = null;
 
-/** Wallets Kit adapter'ı (veya herhangi bir imzalayıcı) buraya takılır */
+/** The Wallets Kit adapter (or any signer) plugs in here */
 export function registerSigner(s: TransactionSigner): void {
-  aktif = s;
+  active = s;
 }
 
-export function aktifSigner(): TransactionSigner | null {
-  return aktif;
+export function activeSigner(): TransactionSigner | null {
+  return active;
 }
 
-/** Takılı signer'ı kaldır (ör. kit bağlantısı kesilince) */
-export function signerKaldir(): void {
-  aktif = null;
+/** Remove the plugged-in signer (e.g. when the kit disconnects) */
+export function unregisterSigner(): void {
+  active = null;
 }
 
-/** Test modu: secret-key ile imzalayan basit signer (demo notuyla birlikte gösterilir) */
+/** Test mode: signs with a secret key (shown with a demo note) */
 export class TestSecretWallet implements TransactionSigner {
   private kp: Keypair;
 
@@ -46,18 +46,38 @@ export class TestSecretWallet implements TransactionSigner {
     tx.sign(this.kp);
     return Promise.resolve(tx.toXDR());
   }
+
+  /** Sign arbitrary bytes — used for the Proof Pack export signature */
+  signBytes(payload: Uint8Array): string {
+    return Buffer.from(this.kp.sign(Buffer.from(payload))).toString("hex");
+  }
 }
 
-/** Test için yeni anahtar çifti üret (friendbot ile fonlanabilir) */
-export function yeniTestAnahtari(): { secret: string; address: string } {
+/** Generate a fresh test keypair (friendbot-fundable) */
+export function newTestKeypair(): { secret: string; address: string } {
   const kp = Keypair.random();
   return { secret: kp.secret(), address: kp.publicKey() };
 }
 
-const SECRET_KEY = "hak.testSecret.v1";
+const DEMO_ADDR_KEY = "agyion.demoAddress.v1";
 
-/** Test secret'ını localStorage'dan yükle; yoksa null */
-export function kayitliTestSigner(): TestSecretWallet | null {
+/**
+ * A stable demo address for mock mode when no wallet is connected.
+ * Generated once per browser; only used as a recorded party string.
+ */
+export function demoAddress(): string {
+  if (typeof window === "undefined") return Keypair.random().publicKey();
+  const existing = window.localStorage.getItem(DEMO_ADDR_KEY);
+  if (existing) return existing;
+  const addr = Keypair.random().publicKey();
+  window.localStorage.setItem(DEMO_ADDR_KEY, addr);
+  return addr;
+}
+
+const SECRET_KEY = "agyion.testSecret.v1";
+
+/** Load the stored test secret from localStorage; null if absent */
+export function storedTestSigner(): TestSecretWallet | null {
   if (typeof window === "undefined") return null;
   const s = window.localStorage.getItem(SECRET_KEY);
   if (!s) return null;
@@ -68,23 +88,23 @@ export function kayitliTestSigner(): TestSecretWallet | null {
   }
 }
 
-export function testSecretKaydet(secret: string): TestSecretWallet {
+export function saveTestSecret(secret: string): TestSecretWallet {
   const w = new TestSecretWallet(secret);
   window.localStorage.setItem(SECRET_KEY, secret.trim());
   return w;
 }
 
-export function testSecretSil(): void {
+export function clearTestSecret(): void {
   if (typeof window === "undefined") return;
   window.localStorage.removeItem(SECRET_KEY);
 }
 
 /**
- * Varsayılan signer çözümleme:
- * 1) Wallets Kit adapter'ı takılıysa o,
- * 2) kayıtlı test secret'ı varsa TestSecretWallet,
- * 3) yoksa null (UI secret-key alanını gösterir).
+ * Default signer resolution:
+ * 1) the Wallets Kit adapter if plugged in,
+ * 2) a stored test secret as TestSecretWallet,
+ * 3) null (the UI shows the secret-key field).
  */
-export function varsayilanSigner(): TransactionSigner | null {
-  return aktif ?? kayitliTestSigner();
+export function defaultSigner(): TransactionSigner | null {
+  return active ?? storedTestSigner();
 }

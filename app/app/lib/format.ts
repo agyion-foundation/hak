@@ -1,45 +1,55 @@
 /**
- * format.ts — minor unit (stroop-benzeri, 7 ondalık) dönüşümleri ve TR gösterim
+ * format.ts — minor-unit (7 decimals) conversions and display helpers
  */
 
 import { CONFIG } from "./config";
 
 const SCALE = 10n ** BigInt(CONFIG.decimals);
 
-/** "12,5" / "12.5" gibi TR girdisini minor unit bigint'e çevirir. Negatif destekli. */
-export function parseMinor(girdi: string): bigint {
-  const s = girdi.trim().replace(/\s/g, "").replace(",", ".");
-  if (!/^-?\d+(\.\d+)?$/.test(s)) throw new Error(`Geçersiz tutar: "${girdi}"`);
+/** Parse "12.5" / "12,5" into minor-unit bigint. Negative supported. */
+export function parseMinor(input: string): bigint {
+  const s = input.trim().replace(/\s/g, "").replace(",", ".");
+  if (!/^-?\d+(\.\d+)?$/.test(s)) throw new Error(`Invalid amount: "${input}"`);
   const neg = s.startsWith("-");
-  const [tam, ond = ""] = s.replace("-", "").split(".");
-  const ondPadded = (ond + "0".repeat(CONFIG.decimals)).slice(0, CONFIG.decimals);
-  const v = BigInt(tam) * SCALE + BigInt(ondPadded || "0");
+  const [whole, frac = ""] = s.replace("-", "").split(".");
+  const fracPadded = (frac + "0".repeat(CONFIG.decimals)).slice(0, CONFIG.decimals);
+  const v = BigInt(whole) * SCALE + BigInt(fracPadded || "0");
   return neg ? -v : v;
 }
 
-/** Minor unit bigint'i TR biçiminde gösterir: 12,5 → "12,5000000" yerine kısaltır */
-export function formatMinor(v: bigint, maxOndalik = 2): string {
+/** Format minor-unit bigint compactly: 12.5 → "12.50" */
+export function formatMinor(v: bigint, maxDecimals = 2): string {
   const neg = v < 0n;
   const a = neg ? -v : v;
-  const tam = a / SCALE;
-  const ond = (a % SCALE).toString().padStart(CONFIG.decimals, "0").replace(/0+$/, "");
-  const ondKisa = ond.slice(0, maxOndalik);
-  const tamTr = tam.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ".");
-  return `${neg ? "-" : ""}${tamTr}${ondKisa ? "," + ondKisa : ""}`;
+  const whole = a / SCALE;
+  const frac = (a % SCALE).toString().padStart(CONFIG.decimals, "0").replace(/0+$/, "");
+  const fracShort = frac.slice(0, maxDecimals);
+  const wholeGrouped = whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return `${neg ? "-" : ""}${wholeGrouped}${fracShort ? "." + fracShort.padEnd(maxDecimals, "0") : ""}`;
 }
 
-/** "4 dk 32 sn" / "1 sa 5 dk" tarzı kalan süre */
-export function formatKalan(saniye: number): string {
-  if (saniye <= 0) return "0 sn";
-  const sa = Math.floor(saniye / 3600);
-  const dk = Math.floor((saniye % 3600) / 60);
-  const sn = saniye % 60;
-  if (sa > 0) return `${sa} sa ${dk} dk ${sn} sn`;
-  if (dk > 0) return `${dk} dk ${sn} sn`;
-  return `${sn} sn`;
+/** Signed variant with explicit + for positive values (ledger tables) */
+export function formatSigned(v: bigint, maxDecimals = 2): string {
+  return (v > 0n ? "+" : "") + formatMinor(v, maxDecimals);
 }
 
-/** G... adresini kısalt: GABCD…WXYZ */
-export function kisaAdres(a: string): string {
+/** "4m 32s" / "1h 5m" style remaining-time label */
+export function formatRemaining(seconds: number): string {
+  if (seconds <= 0) return "0s";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+/** Shorten a G.../C... address: GABCD…WXYZ */
+export function shortAddress(a: string): string {
   return a.length > 12 ? `${a.slice(0, 5)}…${a.slice(-4)}` : a;
+}
+
+/** Shorten a hex blob: ab12…cd34 */
+export function shortHex(h: string): string {
+  return h.length > 12 ? `${h.slice(0, 6)}…${h.slice(-4)}` : h;
 }
