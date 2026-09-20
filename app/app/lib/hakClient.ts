@@ -1,32 +1,53 @@
 /**
- * hakClient.ts — AgyionClient interface + two implementations:
+ * agyionClient.ts — Agyion contract client (SPEC_V2)
  *
- *   MockAgyionClient    — in-browser mock (localStorage), mirrors the contract
- *                         state machines 1:1 (same errors, same rules, ~1s/ledger).
- *   SorobanAgyionClient — real soroban-testnet RPC via the generated bindings
- *                         (app/lib/hak-bindings).
+ * Mirrors the v2 contract signatures exactly:
  *
- * All amounts are i128 minor units (7 decimals). All ids are u64 → bigint.
- * Record types mirror contracts/hak/src/lib.rs verbatim (SPEC_V2).
+ *   FADE    create_fade / fade_price / claim / confirm_handoff / refund / get_fade
+ *   POD     create_pod / claim_pod / get_pod
+ *   TRIGGER create_trigger / attest / refund_trigger / get_trigger
+ *   ENVOY   create_mandate / envoy_claim / revoke_mandate / get_mandate
+ *
+ * Two implementations:
+ *   - MockAgyionClient    : localStorage-backed demo. Uses REAL ed25519
+ *                           signatures (stellar-sdk Keypair) with the exact
+ *                           payload layouts the contract verifies, so the demo
+ *                           exercises the same credential logic as the chain.
+ *   - SorobanAgyionClient : soroban-testnet RPC via generated bindings
+ *                           (app/lib/hak-bindings).
+ *
+ * Addresses travel as strings (G... / C...); i128/u64 as bigint; u32 as
+ * number; BytesN as hex strings at the boundary (Buffer inside).
  */
 
 import { Buffer } from "buffer";
 import { Address, Keypair, StrKey, rpc } from "@stellar/stellar-sdk";
 import {
   Client as BindingsClient,
-  Errors as BindingErrors,
-} from "../../lib/hak-bindings/src/index";
-import type {
-  Fade as ChainFade,
-  Pod as ChainPod,
-  Trigger as ChainTrigger,
-  Mandate as ChainMandate,
-} from "../../lib/hak-bindings/src/index";
-import { handoffPayload, attestPayload, envoyPayload } from "./signers";
+  type Fade as ChainFade,
+  type Pod as ChainPod,
+  type Trigger as ChainTrigger,
+  type Mandate as ChainMandate,
+} from "@/lib/hak-bindings/src/index";
+import {
+  handoffPayload,
+  attestPayload,
+  envoyPayload,
+} from "./signers";
 
 // ---------------------------------------------------------------------------
-// Types (mirror of the contract records)
+// Types (SPEC_V2 — field names are sacred)
 // ---------------------------------------------------------------------------
+
+/** Fade.state: 0=open 1=claimed 2=handoff confirmed (settled) 3=refunded */
+export const FADE_STATE = { Open: 0, Claimed: 1, Settled: 2, Refunded: 3 } as const;
+export type FadeState = (typeof FADE_STATE)[keyof typeof FADE_STATE];
+
+/** Pod.state: 0=buried 1=opened */
+export const POD_STATE = { Buried: 0, Opened: 1 } as const;
+
+/** Trigger.state: 0=pending 1=executed 2=refunded */
+export const TRIGGER_STATE = { Pending: 0, Executed: 1, Refunded: 2 } as const;
 
 export interface Fade {
   id: bigint;
@@ -34,20 +55,17 @@ export interface Fade {
   asset: string;
   pot: bigint;
   start_price: bigint;
-  floor_price: bigint;
+  floor_price: bigint; // may be negative (the below-zero moment)
   start_ledger: number;
   deadline_ledger: number;
   handoff_window: number;
   slope_num: bigint;
-  slope_den: bigint;
-  venue_pubkey: string; // hex BytesN<32>
+  slope_den: bigint; // decay per ledger (rational)
+  venue_pubkey: string; // BytesN<32> hex
   state: FadeState;
   claimant: string | null;
   claimed_at: number | null;
 }
-
-export const FADE_STATE = { Open: 0, Claimed: 1, HandedOff: 2, Refunded: 3 } as const;
-export type FadeState = (typeof FADE_STATE)[keyof typeof FADE_STATE];
 
 export interface Pod {
   id: bigint;
@@ -55,8 +73,8 @@ export interface Pod {
   asset: string;
   amount: bigint;
   unlock_ledger: number;
-  key_hash: string; // hex BytesN<32>
-  state: 0 | 1; // 0=buried 1=opened
+  key_hash: string; // BytesN<32> hex — sha256(preimage)
+  state: 0 | 1;
 }
 
 export interface Trigger {
@@ -65,37 +83,34 @@ export interface Trigger {
   asset: string;
   amount: bigint;
   beneficiary: string;
-  attester_pubkey: string; // hex BytesN<32>
+  attester_pubkey: string; // BytesN<32> hex
   deadline_ledger: number;
-  state: 0 | 1 | 2; // 0=pending 1=executed 2=refunded
+  state: 0 | 1 | 2;
 }
-
-export const TRIGGER_STATE = { Pending: 0, Executed: 1, Refunded: 2 } as const;
 
 export interface Mandate {
   id: bigint;
   owner: string;
-  agent_pubkey: string; // hex BytesN<32>
+  agent_pubkey: string; // BytesN<32> hex
   max_per_tx: bigint;
   daily_cap: bigint;
-  valid_until: number;
   daily_used: bigint;
   window_start: number;
+  valid_until: number;
   revoked: boolean;
+  /** Successful envoy_claim count; capped on-chain at MAX_CLAIMS_PER_MANDATE */
+  claims_used: number;
 }
 
-/** Price at a ledger — identical to the contract's price_at_ledger */
-export function priceAtLedger(f: Fade, ledger: number): bigint {
-  const elapsed = BigInt(Math.max(0, ledger - f.start_ledger));
-  const decline = (f.slope_num * elapsed) / f.slope_den;
-  const price = f.start_price - decline;
-  return price < f.floor_price ? f.floor_price : price;
+/** Settlement breakdown computed at handoff (mock keeps it for the UI) */
+export interface Settlement {
+  price: bigint;
+  claimantPaid: bigint;
+  claimantReceived: bigint;
+  sellerReceived: bigint;
 }
 
-// ---------------------------------------------------------------------------
-// Errors — the same codes as the contract (1..12)
-// ---------------------------------------------------------------------------
-
+/** Contract error codes (SPEC_V2) — defined codes, no panics */
 export enum AgyionErrorCode {
   NotFound = 1,
   InvalidState = 2,
@@ -113,7 +128,7 @@ export enum AgyionErrorCode {
 
 export class AgyionError extends Error {
   constructor(
-    public code: AgyionErrorCode,
+    public readonly code: AgyionErrorCode,
     message: string,
   ) {
     super(message);
@@ -122,7 +137,24 @@ export class AgyionError extends Error {
 }
 
 // ---------------------------------------------------------------------------
-// Signer abstraction (wallet.ts plugs into this)
+// Price curve — linear decay, integer math, stops at the floor.
+// Used identically by the mock, the UI ticker, and as a local estimate.
+// ---------------------------------------------------------------------------
+
+export function priceAtLedger(
+  f: Pick<Fade, "start_price" | "floor_price" | "start_ledger" | "slope_num" | "slope_den">,
+  ledger: number,
+): bigint {
+  const elapsed = BigInt(Math.max(0, Math.floor(ledger) - f.start_ledger));
+  const decay = (elapsed * f.slope_num) / f.slope_den;
+  let p = f.start_price - decay;
+  if (p < f.floor_price) p = f.floor_price;
+  return p;
+}
+
+// ---------------------------------------------------------------------------
+// Wallet abstraction — TransactionSigner is wallet-agnostic; the Wallets Kit
+// adapter (walletsKit.ts) or a TestSecretWallet (wallet.ts) plugs in.
 // ---------------------------------------------------------------------------
 
 export interface TransactionSigner {
@@ -131,12 +163,10 @@ export interface TransactionSigner {
 }
 
 // ---------------------------------------------------------------------------
-// The client interface — panels code against this only
+// Client interface
 // ---------------------------------------------------------------------------
 
 export interface AgyionClient {
-  currentLedger(): Promise<number>;
-
   // Fade
   create_fade(
     seller: string,
@@ -155,8 +185,6 @@ export interface AgyionClient {
   confirm_handoff(fade_id: bigint, ts: bigint, sig: string): Promise<void>;
   refund(fade_id: bigint): Promise<void>;
   get_fade(fade_id: bigint): Promise<Fade | null>;
-  listFades?(): Promise<Fade[]>;
-
   // Pod
   create_pod(
     funder: string,
@@ -167,8 +195,6 @@ export interface AgyionClient {
   ): Promise<bigint>;
   claim_pod(pod_id: bigint, preimage: string, recipient: string): Promise<void>;
   get_pod(pod_id: bigint): Promise<Pod | null>;
-  listPods?(): Promise<Pod[]>;
-
   // Trigger
   create_trigger(
     funder: string,
@@ -181,8 +207,6 @@ export interface AgyionClient {
   attest(trigger_id: bigint, ts: bigint, sig: string): Promise<void>;
   refund_trigger(trigger_id: bigint): Promise<void>;
   get_trigger(trigger_id: bigint): Promise<Trigger | null>;
-  listTriggers?(): Promise<Trigger[]>;
-
   // Envoy
   create_mandate(
     owner: string,
@@ -194,15 +218,26 @@ export interface AgyionClient {
   envoy_claim(mandate_id: bigint, fade_id: bigint, ts: bigint, agent_sig: string): Promise<void>;
   revoke_mandate(owner: string, mandate_id: bigint): Promise<void>;
   get_mandate(mandate_id: bigint): Promise<Mandate | null>;
-  listMandates?(): Promise<Mandate[]>;
+  // Shared
+  currentLedger(): Promise<number>;
 }
 
 // ---------------------------------------------------------------------------
-// MockAgyionClient — localStorage-backed, contract-faithful simulation
+// MockAgyionClient — localStorage demo with real ed25519 credentials
 // ---------------------------------------------------------------------------
 
-const STORE_KEY = "agyion.mock.v2";
-const LEDGERS_PER_DAY = 17280;
+const MOCK_KEY = "agyion.mock.v1";
+/** Demo tempo: 1 ledger ≈ 1 second (testnet is ~5s; the UI wants a live tick) */
+export const MOCK_LEDGER_MS = 1000;
+/** Contract constant (envoy.rs): ledgers per day-window */
+export const LEDGERS_PER_DAY = 17_280;
+/**
+ * Contract constant (envoy.rs, audit v2 fix): max successful claims per
+ * mandate. Under the Envoy price<=0 restriction the monetary caps are
+ * effectively dead (daily_used stays 0) — this claim-count cap is the active
+ * bound on agent activity.
+ */
+export const MAX_CLAIMS_PER_MANDATE = 50;
 
 interface MockStore {
   epochMs: number;
@@ -211,38 +246,62 @@ interface MockStore {
   nextPodId: string;
   nextTriggerId: string;
   nextMandateId: string;
-  fades: MockFade[];
-  pods: MockPod[];
-  triggers: MockTrigger[];
-  mandates: MockMandate[];
+  venueSecret: string; // demo venue ed25519 secret (S...)
+  fades: MockFadeRec[];
+  pods: MockPodRec[];
+  triggers: MockTriggerRec[];
+  mandates: MockMandateRec[];
 }
 
-// bigint → string for JSON
-type MockFade = Omit<Fade, "id" | "pot" | "start_price" | "floor_price" | "slope_num" | "slope_den"> & {
+interface MockFadeRec extends Omit<Fade, "id"> {
   id: string;
-  pot: string;
-  start_price: string;
-  floor_price: string;
-  slope_num: string;
-  slope_den: string;
-};
-type MockPod = Omit<Pod, "id" | "amount"> & { id: string; amount: string };
-type MockTrigger = Omit<Trigger, "id" | "amount"> & { id: string; amount: string };
-type MockMandate = Omit<Mandate, "id" | "max_per_tx" | "daily_cap" | "daily_used"> & {
+  settlement?: Settlement;
+}
+interface MockPodRec extends Omit<Pod, "id"> {
   id: string;
-  max_per_tx: string;
-  daily_cap: string;
-  daily_used: string;
-};
+}
+interface MockTriggerRec extends Omit<Trigger, "id"> {
+  id: string;
+}
+interface MockMandateRec extends Omit<Mandate, "id"> {
+  id: string;
+}
 
-function emptyStore(): MockStore {
+async function sha256HexBytes(data: Uint8Array): Promise<string> {
+  const h = await crypto.subtle.digest("SHA-256", data as BufferSource);
+  return Buffer.from(h).toString("hex");
+}
+
+export async function sha256Hex(input: string): Promise<string> {
+  return sha256HexBytes(new TextEncoder().encode(input));
+}
+
+function loadStore(): MockStore {
+  if (typeof window === "undefined") return freshStore();
+  const raw = window.localStorage.getItem(MOCK_KEY);
+  if (raw) {
+    try {
+      return JSON.parse(raw, (_k, v) =>
+        typeof v === "string" && /^-?\d+n$/.test(v) ? BigInt(v.slice(0, -1)) : v,
+      ) as MockStore;
+    } catch {
+      /* corrupted — start fresh */
+    }
+  }
+  const s = freshStore();
+  saveStore(s);
+  return s;
+}
+
+function freshStore(): MockStore {
   return {
     epochMs: Date.now(),
-    baseLedger: 1000,
+    baseLedger: 1_000_000,
     nextFadeId: "1",
     nextPodId: "1",
     nextTriggerId: "1",
     nextMandateId: "1",
+    venueSecret: Keypair.random().secret(),
     fades: [],
     pods: [],
     triggers: [],
@@ -250,19 +309,13 @@ function emptyStore(): MockStore {
   };
 }
 
-function loadStore(): MockStore {
-  if (typeof window === "undefined") return emptyStore();
-  try {
-    const raw = window.localStorage.getItem(STORE_KEY);
-    if (!raw) return emptyStore();
-    return { ...emptyStore(), ...(JSON.parse(raw) as MockStore) };
-  } catch {
-    return emptyStore();
-  }
+function saveStore(s: MockStore): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(
+    MOCK_KEY,
+    JSON.stringify(s, (_k, v) => (typeof v === "bigint" ? `${v}n` : v)),
+  );
 }
-
-/** Mock ledger tempo: 1 ledger per second (demo pace; testnet is ~5s) */
-const MOCK_SECONDS_PER_LEDGER = 1;
 
 export class MockAgyionClient implements AgyionClient {
   private store: MockStore;
@@ -272,46 +325,37 @@ export class MockAgyionClient implements AgyionClient {
   }
 
   private persist(): void {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(STORE_KEY, JSON.stringify(this.store));
+    saveStore(this.store);
   }
 
-  async currentLedger(): Promise<number> {
-    return (
-      this.store.baseLedger +
-      Math.floor((Date.now() - this.store.epochMs) / (MOCK_SECONDS_PER_LEDGER * 1000))
-    );
+  currentLedger(): Promise<number> {
+    const { epochMs, baseLedger } = this.store;
+    return Promise.resolve(baseLedger + Math.floor((Date.now() - epochMs) / MOCK_LEDGER_MS));
   }
 
-  /** Demo helper: jump the mock ledger forward */
-  advanceLedgers(n: number): void {
-    const now = Date.now();
-    const cur =
-      this.store.baseLedger +
-      Math.floor((now - this.store.epochMs) / (MOCK_SECONDS_PER_LEDGER * 1000));
-    this.store.baseLedger = cur + n;
-    this.store.epochMs = now;
+  /** Demo venue pubkey (BytesN<32> hex) — the seller form records this */
+  venuePubkey(): string {
+    return Buffer.from(Keypair.fromSecret(this.store.venueSecret).rawPublicKey()).toString("hex");
+  }
+
+  /** Demo helper: the handoff screen's "sign" button uses this (in production the venue device signs) */
+  mockVenueSign(fadeId: bigint, claimant: string, ts: bigint): string {
+    const kp = Keypair.fromSecret(this.store.venueSecret);
+    return Buffer.from(kp.sign(handoffPayload(fadeId, claimant, ts))).toString("hex");
+  }
+
+  /** Demo reset */
+  reset(): void {
+    this.store = freshStore();
     this.persist();
   }
 
   // ---- Fade ----
 
-  private findFade(id: bigint): MockFade {
-    const f = this.store.fades.find((x) => BigInt(x.id) === id);
-    if (!f) throw new AgyionError(AgyionErrorCode.NotFound, `Fade not found: #${id}`);
-    return f;
-  }
-
-  private toFade(f: MockFade): Fade {
-    return {
-      ...f,
-      id: BigInt(f.id),
-      pot: BigInt(f.pot),
-      start_price: BigInt(f.start_price),
-      floor_price: BigInt(f.floor_price),
-      slope_num: BigInt(f.slope_num),
-      slope_den: BigInt(f.slope_den),
-    };
+  private findFade(id: bigint): MockFadeRec {
+    const rec = this.store.fades.find((f) => BigInt(f.id) === id);
+    if (!rec) throw new AgyionError(AgyionErrorCode.NotFound, `Fade not found: #${id}`);
+    return rec;
   }
 
   async create_fade(
@@ -326,30 +370,27 @@ export class MockAgyionClient implements AgyionClient {
     handoff_window: number,
     venue_pubkey: string,
   ): Promise<bigint> {
-    if (pot <= 0n || start_price < floor_price)
-      throw new AgyionError(AgyionErrorCode.InvalidAmount, "pot<=0 or start_price<floor_price");
-    if (floor_price < -pot)
-      throw new AgyionError(AgyionErrorCode.InvalidAmount, "floor_price < -pot (payout cap)");
-    if (slope_den <= 0n || slope_num < 0n || duration_ledgers === 0 || handoff_window === 0)
-      throw new AgyionError(AgyionErrorCode.InvalidCurve, "Invalid curve parameters");
-    if (/^0+$/.test(venue_pubkey))
-      throw new AgyionError(AgyionErrorCode.BadSignature, "Zero venue pubkey");
-
-    const now = await this.currentLedger();
+    if (pot <= 0n || start_price === 0n)
+      throw new AgyionError(AgyionErrorCode.InvalidAmount, "Pot and start price must be non-zero");
+    if (slope_den === 0n || floor_price >= start_price)
+      throw new AgyionError(AgyionErrorCode.InvalidCurve, "Invalid decay curve");
+    if (handoff_window === 0)
+      throw new AgyionError(AgyionErrorCode.InvalidInput, "Handoff window must be non-zero");
+    const start = await this.currentLedger();
     const id = BigInt(this.store.nextFadeId);
     this.store.nextFadeId = (id + 1n).toString();
     this.store.fades.push({
       id: id.toString(),
       seller,
       asset,
-      pot: pot.toString(),
-      start_price: start_price.toString(),
-      floor_price: floor_price.toString(),
-      start_ledger: now,
-      deadline_ledger: now + duration_ledgers,
+      pot,
+      start_price,
+      floor_price,
+      start_ledger: start,
+      deadline_ledger: start + duration_ledgers,
       handoff_window,
-      slope_num: slope_num.toString(),
-      slope_den: slope_den.toString(),
+      slope_num,
+      slope_den,
       venue_pubkey: venue_pubkey.toLowerCase(),
       state: FADE_STATE.Open,
       claimant: null,
@@ -360,62 +401,84 @@ export class MockAgyionClient implements AgyionClient {
   }
 
   async fade_price(fade_id: bigint): Promise<bigint> {
-    const f = this.findFade(fade_id);
-    return priceAtLedger(this.toFade(f), await this.currentLedger());
+    return priceAtLedger(this.findFade(fade_id), await this.currentLedger());
   }
 
   async claim(fade_id: bigint, claimant: string): Promise<void> {
-    const f = this.findFade(fade_id);
-    if (f.state !== FADE_STATE.Open)
+    const rec = this.findFade(fade_id);
+    if (rec.state !== FADE_STATE.Open)
       throw new AgyionError(AgyionErrorCode.InvalidState, "Fade is no longer open");
     const now = await this.currentLedger();
-    if (now > f.deadline_ledger)
-      throw new AgyionError(AgyionErrorCode.InvalidState, "Deadline passed; the fade fell to refund");
-    f.state = FADE_STATE.Claimed;
-    f.claimant = claimant;
-    f.claimed_at = now;
+    if (now > rec.deadline_ledger)
+      throw new AgyionError(AgyionErrorCode.DeadlinePassed, "The deadline has passed; claiming is closed");
+    rec.state = FADE_STATE.Claimed;
+    rec.claimant = claimant;
+    rec.claimed_at = now;
     this.persist();
   }
 
   async confirm_handoff(fade_id: bigint, ts: bigint, sig: string): Promise<void> {
-    const f = this.findFade(fade_id);
-    if (f.state !== FADE_STATE.Claimed || !f.claimant || f.claimed_at === null)
-      throw new AgyionError(AgyionErrorCode.InvalidState, "Fade is not in claimed state");
+    const rec = this.findFade(fade_id);
+    if (rec.state !== FADE_STATE.Claimed || rec.claimant == null || rec.claimed_at == null)
+      throw new AgyionError(AgyionErrorCode.InvalidState, "Claim first, then confirm handoff");
     const now = await this.currentLedger();
-    if (now > f.claimed_at + f.handoff_window)
-      throw new AgyionError(
-        AgyionErrorCode.InvalidState,
-        "Handoff window elapsed; on a no-show, refund wins",
-      );
-    const payload = handoffPayload(fade_id, f.claimant, ts);
+    if (now > rec.claimed_at + rec.handoff_window)
+      throw new AgyionError(AgyionErrorCode.DeadlinePassed, "Handoff window elapsed; refund wins");
+    const payload = handoffPayload(fade_id, rec.claimant, ts);
     const sigBuf = Buffer.from(sig.trim().toLowerCase(), "hex");
-    if (!rawEd25519Verify(f.venue_pubkey, payload, sigBuf))
-      throw new AgyionError(AgyionErrorCode.BadSignature, "Venue signature could not be verified");
-    f.state = FADE_STATE.HandedOff;
+    const ok = rawEd25519Verify(rec.venue_pubkey, payload, sigBuf);
+    if (!ok) throw new AgyionError(AgyionErrorCode.BadSignature, "Venue signature could not be verified");
+
+    const price = priceAtLedger(rec, rec.claimed_at);
+    let claimantPaid = 0n;
+    let claimantReceived = 0n;
+    let sellerReceived = 0n;
+    if (price > 0n) {
+      claimantPaid = price;
+      sellerReceived = rec.pot;
+    } else if (price < 0n) {
+      claimantReceived = -price > rec.pot ? rec.pot : -price;
+      sellerReceived = rec.pot - claimantReceived;
+    } else {
+      sellerReceived = rec.pot;
+    }
+    rec.settlement = { price, claimantPaid, claimantReceived, sellerReceived };
+    rec.state = FADE_STATE.Settled;
     this.persist();
   }
 
   async refund(fade_id: bigint): Promise<void> {
-    const f = this.findFade(fade_id);
+    const rec = this.findFade(fade_id);
     const now = await this.currentLedger();
-    const ok =
-      (f.state === FADE_STATE.Open && now > f.deadline_ledger) ||
-      (f.state === FADE_STATE.Claimed &&
-        f.claimed_at !== null &&
-        now > f.claimed_at + f.handoff_window);
-    if (!ok)
-      throw new AgyionError(AgyionErrorCode.DeadlinePassed, "Refund condition not met yet");
-    f.state = FADE_STATE.Refunded;
+    const deadlinePassedNoClaim = rec.state === FADE_STATE.Open && now > rec.deadline_ledger;
+    const windowElapsedNoHandoff =
+      rec.state === FADE_STATE.Claimed &&
+      rec.claimed_at != null &&
+      now > rec.claimed_at + rec.handoff_window;
+    if (!deadlinePassedNoClaim && !windowElapsedNoHandoff)
+      throw new AgyionError(
+        AgyionErrorCode.Locked,
+        "Refund condition not met: deadline not passed or handoff window still running",
+      );
+    rec.settlement = { price: 0n, claimantPaid: 0n, claimantReceived: 0n, sellerReceived: rec.pot };
+    rec.state = FADE_STATE.Refunded;
     this.persist();
   }
 
   async get_fade(fade_id: bigint): Promise<Fade | null> {
-    const f = this.store.fades.find((x) => BigInt(x.id) === fade_id);
-    return f ? this.toFade(f) : null;
+    const rec = this.store.fades.find((f) => BigInt(f.id) === fade_id);
+    return rec ? { ...rec, id: BigInt(rec.id) } : null;
   }
 
+  /** Mock-only: latest fade with settlement (single-screen demo flow) */
+  async getLatestFade(): Promise<(Fade & { settlement?: Settlement }) | null> {
+    const rec = this.store.fades[this.store.fades.length - 1];
+    return rec ? { ...rec, id: BigInt(rec.id), settlement: rec.settlement } : null;
+  }
+
+  /** Mock-only: all fades (Envoy agent loop watches these) */
   async listFades(): Promise<Fade[]> {
-    return this.store.fades.map((f) => this.toFade(f));
+    return this.store.fades.map((f) => ({ ...f, id: BigInt(f.id) }));
   }
 
   // ---- Pod ----
@@ -427,46 +490,43 @@ export class MockAgyionClient implements AgyionClient {
     unlock_ledger: number,
     key_hash: string,
   ): Promise<bigint> {
-    if (amount <= 0n) throw new AgyionError(AgyionErrorCode.InvalidAmount, "amount<=0");
+    if (amount <= 0n) throw new AgyionError(AgyionErrorCode.InvalidAmount, "Amount must be positive");
     const id = BigInt(this.store.nextPodId);
     this.store.nextPodId = (id + 1n).toString();
     this.store.pods.push({
       id: id.toString(),
       funder,
       asset,
-      amount: amount.toString(),
+      amount,
       unlock_ledger,
       key_hash: key_hash.toLowerCase(),
-      state: 0,
+      state: POD_STATE.Buried,
     });
     this.persist();
     return id;
   }
 
   async claim_pod(pod_id: bigint, preimage: string, recipient: string): Promise<void> {
-    const p = this.store.pods.find((x) => BigInt(x.id) === pod_id);
-    if (!p) throw new AgyionError(AgyionErrorCode.NotFound, `Pod not found: #${pod_id}`);
-    if (p.state !== 0)
+    const rec = this.store.pods.find((p) => BigInt(p.id) === pod_id);
+    if (!rec) throw new AgyionError(AgyionErrorCode.NotFound, `Pod not found: #${pod_id}`);
+    if (rec.state !== POD_STATE.Buried)
       throw new AgyionError(AgyionErrorCode.InvalidState, "Pod already opened");
-    const now = await this.currentLedger();
-    if (now < p.unlock_ledger)
-      throw new AgyionError(AgyionErrorCode.Locked, `Unlock ledger not reached: ${p.unlock_ledger}`);
-    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(preimage));
-    const hex = Buffer.from(digest).toString("hex");
-    if (hex !== p.key_hash)
-      throw new AgyionError(AgyionErrorCode.BadSignature, "sha256(preimage) != key_hash");
-    void recipient; // the mock does not move balances
-    p.state = 1;
+    if ((await this.currentLedger()) < rec.unlock_ledger)
+      throw new AgyionError(AgyionErrorCode.Locked, "Pod is still buried — unlock ledger not reached");
+    if ((await sha256Hex(preimage)) !== rec.key_hash)
+      throw new AgyionError(AgyionErrorCode.BadSignature, "Preimage does not match the key hash");
+    void recipient; // recipient authorizes the tx (front-running protection); recorded on-chain
+    rec.state = POD_STATE.Opened;
     this.persist();
   }
 
   async get_pod(pod_id: bigint): Promise<Pod | null> {
-    const p = this.store.pods.find((x) => BigInt(x.id) === pod_id);
-    return p ? { ...p, id: BigInt(p.id), amount: BigInt(p.amount) } : null;
+    const rec = this.store.pods.find((p) => BigInt(p.id) === pod_id);
+    return rec ? { ...rec, id: BigInt(rec.id) } : null;
   }
 
   async listPods(): Promise<Pod[]> {
-    return this.store.pods.map((p) => ({ ...p, id: BigInt(p.id), amount: BigInt(p.amount) }));
+    return this.store.pods.map((p) => ({ ...p, id: BigInt(p.id) }));
   }
 
   // ---- Trigger ----
@@ -479,16 +539,14 @@ export class MockAgyionClient implements AgyionClient {
     attester_pubkey: string,
     deadline_ledger: number,
   ): Promise<bigint> {
-    if (amount <= 0n) throw new AgyionError(AgyionErrorCode.InvalidAmount, "amount<=0");
-    if (/^0+$/.test(attester_pubkey))
-      throw new AgyionError(AgyionErrorCode.BadSignature, "Zero attester pubkey");
+    if (amount <= 0n) throw new AgyionError(AgyionErrorCode.InvalidAmount, "Amount must be positive");
     const id = BigInt(this.store.nextTriggerId);
     this.store.nextTriggerId = (id + 1n).toString();
     this.store.triggers.push({
       id: id.toString(),
       funder,
       asset,
-      amount: amount.toString(),
+      amount,
       beneficiary,
       attester_pubkey: attester_pubkey.toLowerCase(),
       deadline_ledger,
@@ -499,30 +557,30 @@ export class MockAgyionClient implements AgyionClient {
   }
 
   async attest(trigger_id: bigint, ts: bigint, sig: string): Promise<void> {
-    const t = this.store.triggers.find((x) => BigInt(x.id) === trigger_id);
-    if (!t) throw new AgyionError(AgyionErrorCode.NotFound, `Trigger not found: #${trigger_id}`);
-    if (t.state !== TRIGGER_STATE.Pending)
+    const rec = this.store.triggers.find((t) => BigInt(t.id) === trigger_id);
+    if (!rec) throw new AgyionError(AgyionErrorCode.NotFound, `Trigger not found: #${trigger_id}`);
+    if (rec.state !== TRIGGER_STATE.Pending)
       throw new AgyionError(AgyionErrorCode.InvalidState, "Trigger already resolved");
     const now = await this.currentLedger();
-    if (now > t.deadline_ledger)
-      throw new AgyionError(AgyionErrorCode.DeadlinePassed, "Attestation window closed; falls to refund");
-    const payload = attestPayload(trigger_id, t.beneficiary, ts);
+    if (now > rec.deadline_ledger)
+      throw new AgyionError(AgyionErrorCode.DeadlinePassed, "Deadline passed; only refund remains");
+    const payload = attestPayload(trigger_id, rec.beneficiary, ts);
     const sigBuf = Buffer.from(sig.trim().toLowerCase(), "hex");
-    if (!rawEd25519Verify(t.attester_pubkey, payload, sigBuf))
+    if (!rawEd25519Verify(rec.attester_pubkey, payload, sigBuf))
       throw new AgyionError(AgyionErrorCode.BadSignature, "Attester signature could not be verified");
-    t.state = TRIGGER_STATE.Executed;
+    rec.state = TRIGGER_STATE.Executed;
     this.persist();
   }
 
   async refund_trigger(trigger_id: bigint): Promise<void> {
-    const t = this.store.triggers.find((x) => BigInt(x.id) === trigger_id);
-    if (!t) throw new AgyionError(AgyionErrorCode.NotFound, `Trigger not found: #${trigger_id}`);
-    if (t.state !== TRIGGER_STATE.Pending)
+    const rec = this.store.triggers.find((t) => BigInt(t.id) === trigger_id);
+    if (!rec) throw new AgyionError(AgyionErrorCode.NotFound, `Trigger not found: #${trigger_id}`);
+    if (rec.state !== TRIGGER_STATE.Pending)
       throw new AgyionError(AgyionErrorCode.InvalidState, "Trigger already resolved");
     const now = await this.currentLedger();
-    if (now <= t.deadline_ledger)
+    if (now <= rec.deadline_ledger)
       throw new AgyionError(AgyionErrorCode.Locked, "Deadline not passed yet; escrow stays locked");
-    t.state = TRIGGER_STATE.Refunded;
+    rec.state = TRIGGER_STATE.Refunded;
     this.persist();
   }
 
@@ -561,6 +619,7 @@ export class MockAgyionClient implements AgyionClient {
       window_start: now,
       valid_until,
       revoked: false,
+      claims_used: 0,
     });
     this.persist();
     return id;
@@ -598,8 +657,13 @@ export class MockAgyionClient implements AgyionClient {
     }
     if (m.daily_used + price > m.daily_cap)
       throw new AgyionError(AgyionErrorCode.CapExceeded, "Daily cap would be exceeded — the contract said no");
+    // Claim-count cap (mirrors envoy.rs MAX_CLAIMS_PER_MANDATE, audit v2 fix):
+    // the active bound under the price<=0 restriction.
+    if (m.claims_used >= MAX_CLAIMS_PER_MANDATE)
+      throw new AgyionError(AgyionErrorCode.CapExceeded, `Claim limit reached (${MAX_CLAIMS_PER_MANDATE} per mandate) — the contract said no`);
 
     m.daily_used += price;
+    m.claims_used += 1;
     fade.state = FADE_STATE.Claimed;
     fade.claimant = m.owner; // recipient is fixed to the owner
     fade.claimed_at = now;
@@ -718,6 +782,7 @@ function mandateFromChain(id: bigint, m: ChainMandate): Mandate {
     window_start: m.window_start,
     valid_until: m.valid_until,
     revoked: m.revoked,
+    claims_used: m.claims_used,
   };
 }
 
