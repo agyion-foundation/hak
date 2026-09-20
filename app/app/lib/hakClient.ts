@@ -1,141 +1,144 @@
 /**
- * hakClient.ts — HAK kontrat istemcisi
+ * hakClient.ts — AgyionClient interface + two implementations:
  *
- * SPEC §3.2 fonksiyon imzaları KUTSAL'dır; bu arayüz onları birebir karşılar:
+ *   MockAgyionClient    — in-browser mock (localStorage), mirrors the contract
+ *                         state machines 1:1 (same errors, same rules, ~1s/ledger).
+ *   SorobanAgyionClient — real soroban-testnet RPC via the generated bindings
+ *                         (app/lib/hak-bindings).
  *
- *   create_listing(seller, asset, pot, start_price, floor_price, slope_num,
- *                  slope_den, duration_ledgers, pickup_window, venue_pubkey) -> u64
- *   price_at(listing_id) -> i128                       (view; lineer geriye akan, floor'da durur)
- *   claim(listing_id, claimant)
- *   confirm_pickup(listing_id, ts, sig)                (venue ed25519: listing_id||claimant||ts)
- *   iade(listing_id)                                   (kurallı geri dönüş, takdir yok)
- *   create_capsule(funder, asset, amount, unlock_ledger, key_hash) -> u64
- *   claim_capsule(capsule_id, preimage, recipient)
- *
- * İki implementasyon:
- *   - MockHakClient    : localStorage tabanlı, fiyat eğrisi slope_num/slope_den
- *                        rasyoneliyle SPEC'le birebir aynı. Demo/test modu.
- *   - SorobanHakClient : gerçek soroban-testnet RPC binding (@stellar/stellar-sdk).
- *
- * Adresler zincirde Address; istemcide string (G... / C...) olarak taşınır.
- * i128 değerler bigint, u64 bigint, u32 number, BytesN hex string olarak taşınır.
+ * All amounts are i128 minor units (7 decimals). All ids are u64 → bigint.
+ * Record types mirror contracts/hak/src/lib.rs verbatim (SPEC_V2).
  */
 
 import { Buffer } from "buffer";
-import { rpc } from "@stellar/stellar-sdk";
+import { Address, Keypair, StrKey, rpc } from "@stellar/stellar-sdk";
 import {
-  Client as HakBindingsClient,
-  type Capsule as ZincirCapsule,
-  type Listing as ZincirListing,
-} from "@/lib/hak-bindings/src/index";
+  Client as BindingsClient,
+  Errors as BindingErrors,
+} from "../../lib/hak-bindings/src/index";
+import type {
+  Fade as ChainFade,
+  Pod as ChainPod,
+  Trigger as ChainTrigger,
+  Mandate as ChainMandate,
+} from "../../lib/hak-bindings/src/index";
+import { handoffPayload, attestPayload, envoyPayload } from "./signers";
 
 // ---------------------------------------------------------------------------
-// SPEC §3.1 — Tipler
+// Types (mirror of the contract records)
 // ---------------------------------------------------------------------------
 
-/** generic: T1=1, T2=2 (zincirde anlam generik — CANON kural 7) */
-export enum Template {
-  SonSaat = 1,
-  Kapsul = 2,
-}
-
-/** Listing.state: 0=açık 1=claim edildi 2=teslim tamam 3=iade edildi */
-export const LISTING_STATE = { Acik: 0, ClaimEdildi: 1, TeslimTamam: 2, IadeEdildi: 3 } as const;
-export type ListingState = (typeof LISTING_STATE)[keyof typeof LISTING_STATE];
-
-/** Capsule.state: 0=gömülü 1=açıldı */
-export const CAPSULE_STATE = { Gomulu: 0, Acildi: 1 } as const;
-
-export interface Listing {
-  id: bigint; // zincirin döndürdüğü u64 listing_id (istemci kolaylığı)
+export interface Fade {
+  id: bigint;
   seller: string;
   asset: string;
   pot: bigint;
-  start_price: bigint; // stroop-benzeri minor unit
-  floor_price: bigint; // negatif olabilir (alt sınır)
+  start_price: bigint;
+  floor_price: bigint;
   start_ledger: number;
   deadline_ledger: number;
-  pickup_window: number;
+  handoff_window: number;
   slope_num: bigint;
-  slope_den: bigint; // ledger başına düşüş (rasyonel)
-  venue_pubkey: string; // BytesN<32> hex
-  state: ListingState;
+  slope_den: bigint;
+  venue_pubkey: string; // hex BytesN<32>
+  state: FadeState;
   claimant: string | null;
   claimed_at: number | null;
 }
 
-export interface Capsule {
+export const FADE_STATE = { Open: 0, Claimed: 1, HandedOff: 2, Refunded: 3 } as const;
+export type FadeState = (typeof FADE_STATE)[keyof typeof FADE_STATE];
+
+export interface Pod {
   id: bigint;
   funder: string;
   asset: string;
   amount: bigint;
   unlock_ledger: number;
-  key_hash: string; // BytesN<32> hex — sha256(preimage)
-  state: 0 | 1;
+  key_hash: string; // hex BytesN<32>
+  state: 0 | 1; // 0=buried 1=opened
 }
 
-/** SPEC §3.3 — panic yerine tanımlı hata kodları */
-export enum HakErrorCode {
-  ListingYok = 1,
-  CapsuleYok = 2,
-  DurumUygunDegil = 3, // state machine tek yönlü; geçersiz geçiş
-  DeadlineGecmis = 4, // claim için çok geç
-  IadeKosuluOlgusmamis = 5, // deadline dolmadı / pickup_window dolmadı
-  ImzaGecersiz = 6, // venue ed25519 doğrulaması başarısız
-  KapsulKilitli = 7, // unlock_ledger'a erişilmedi
-  PreimageYanlis = 8, // sha256(preimage) != key_hash
-  Yetkisiz = 9,
-  RpcHatasi = 10,
+export interface Trigger {
+  id: bigint;
+  funder: string;
+  asset: string;
+  amount: bigint;
+  beneficiary: string;
+  attester_pubkey: string; // hex BytesN<32>
+  deadline_ledger: number;
+  state: 0 | 1 | 2; // 0=pending 1=executed 2=refunded
 }
 
-export class HakError extends Error {
+export const TRIGGER_STATE = { Pending: 0, Executed: 1, Refunded: 2 } as const;
+
+export interface Mandate {
+  id: bigint;
+  owner: string;
+  agent_pubkey: string; // hex BytesN<32>
+  max_per_tx: bigint;
+  daily_cap: bigint;
+  valid_until: number;
+  daily_used: bigint;
+  window_start: number;
+  revoked: boolean;
+}
+
+/** Price at a ledger — identical to the contract's price_at_ledger */
+export function priceAtLedger(f: Fade, ledger: number): bigint {
+  const elapsed = BigInt(Math.max(0, ledger - f.start_ledger));
+  const decline = (f.slope_num * elapsed) / f.slope_den;
+  const price = f.start_price - decline;
+  return price < f.floor_price ? f.floor_price : price;
+}
+
+// ---------------------------------------------------------------------------
+// Errors — the same codes as the contract (1..12)
+// ---------------------------------------------------------------------------
+
+export enum AgyionErrorCode {
+  NotFound = 1,
+  InvalidState = 2,
+  InvalidAmount = 3,
+  InvalidCurve = 4,
+  DeadlinePassed = 5,
+  Locked = 6,
+  BadSignature = 7,
+  CapExceeded = 9,
+  MandateExpired = 10,
+  Unauthorized = 11,
+  InvalidInput = 12,
+  RpcError = 100,
+}
+
+export class AgyionError extends Error {
   constructor(
-    public readonly code: HakErrorCode,
+    public code: AgyionErrorCode,
     message: string,
   ) {
     super(message);
-    this.name = "HakError";
+    this.name = "AgyionError";
   }
 }
 
 // ---------------------------------------------------------------------------
-// Fiyat eğrisi — SPEC §3.2 price_at: "lineer geriye akan, floor'da durur"
-// slope_num/slope_den rasyoneli ledger başına düşüş; tamsayı bölmesi.
-// Bu fonksiyon mock'ta, UI'da ve (yerel tahmin olarak) gerçek modda
-// BİREBİR aynı kullanılır.
-// ---------------------------------------------------------------------------
-
-export function priceAtLedger(
-  l: Pick<Listing, "start_price" | "floor_price" | "start_ledger" | "slope_num" | "slope_den">,
-  ledger: number,
-): bigint {
-  const gecen = BigInt(Math.max(0, Math.floor(ledger) - l.start_ledger));
-  const dusus = (gecen * l.slope_num) / l.slope_den; // rasyonel, tabana yuvarlanır
-  let p = l.start_price - dusus;
-  if (p < l.floor_price) p = l.floor_price; // floor'da durur (floor negatif olabilir)
-  return p;
-}
-
-// ---------------------------------------------------------------------------
-// İmzalama soyutlaması (cüzdan) — SPEC §4: Stellar Wallets Kit; yoksa
-// test modunda secret-key. Gerçek mod SorobanHakClient'a bir imzalayıcı
-// enjekte edilir; mock mod imza gerektirmez.
+// Signer abstraction (wallet.ts plugs into this)
 // ---------------------------------------------------------------------------
 
 export interface TransactionSigner {
-  /** İşlemi gönderen hesap adresi (G...) */
   address(): Promise<string>;
-  /** Hazırlanmış işlem XDR'ını imzalar, imzalı XDR döner */
   signTransaction(txXdr: string, networkPassphrase: string): Promise<string>;
 }
 
 // ---------------------------------------------------------------------------
-// SPEC §3.2 — İstemci arayüzü (imzalar birebir)
+// The client interface — panels code against this only
 // ---------------------------------------------------------------------------
 
-export interface HakClient {
-  // Son Saat
-  create_listing(
+export interface AgyionClient {
+  currentLedger(): Promise<number>;
+
+  // Fade
+  create_fade(
     seller: string,
     asset: string,
     pot: bigint,
@@ -144,127 +147,124 @@ export interface HakClient {
     slope_num: bigint,
     slope_den: bigint,
     duration_ledgers: number,
-    pickup_window: number,
+    handoff_window: number,
     venue_pubkey: string,
   ): Promise<bigint>;
-  price_at(listing_id: bigint): Promise<bigint>;
-  claim(listing_id: bigint, claimant: string): Promise<void>;
-  confirm_pickup(listing_id: bigint, ts: bigint, sig: string): Promise<void>;
-  iade(listing_id: bigint): Promise<void>;
-  // Kapsül
-  create_capsule(
+  fade_price(fade_id: bigint): Promise<bigint>;
+  claim(fade_id: bigint, claimant: string): Promise<void>;
+  confirm_handoff(fade_id: bigint, ts: bigint, sig: string): Promise<void>;
+  refund(fade_id: bigint): Promise<void>;
+  get_fade(fade_id: bigint): Promise<Fade | null>;
+  listFades?(): Promise<Fade[]>;
+
+  // Pod
+  create_pod(
     funder: string,
     asset: string,
     amount: bigint,
     unlock_ledger: number,
     key_hash: string,
   ): Promise<bigint>;
-  claim_capsule(capsule_id: bigint, preimage: string, recipient: string): Promise<void>;
+  claim_pod(pod_id: bigint, preimage: string, recipient: string): Promise<void>;
+  get_pod(pod_id: bigint): Promise<Pod | null>;
+  listPods?(): Promise<Pod[]>;
 
-  // Okuma yardımcıları (zincir view'ları / mock kayıtları)
-  getListing(listing_id: bigint): Promise<Listing | null>;
-  getCapsule(capsule_id: bigint): Promise<Capsule | null>;
-  /** Güncel ledger sırası (mock: saat tabanlı; gerçek: RPC getLatestLedger) */
-  currentLedger(): Promise<number>;
+  // Trigger
+  create_trigger(
+    funder: string,
+    asset: string,
+    amount: bigint,
+    beneficiary: string,
+    attester_pubkey: string,
+    deadline_ledger: number,
+  ): Promise<bigint>;
+  attest(trigger_id: bigint, ts: bigint, sig: string): Promise<void>;
+  refund_trigger(trigger_id: bigint): Promise<void>;
+  get_trigger(trigger_id: bigint): Promise<Trigger | null>;
+  listTriggers?(): Promise<Trigger[]>;
+
+  // Envoy
+  create_mandate(
+    owner: string,
+    agent_pubkey: string,
+    max_per_tx: bigint,
+    daily_cap: bigint,
+    valid_until: number,
+  ): Promise<bigint>;
+  envoy_claim(mandate_id: bigint, fade_id: bigint, ts: bigint, agent_sig: string): Promise<void>;
+  revoke_mandate(owner: string, mandate_id: bigint): Promise<void>;
+  get_mandate(mandate_id: bigint): Promise<Mandate | null>;
+  listMandates?(): Promise<Mandate[]>;
 }
 
 // ---------------------------------------------------------------------------
-// MockHakClient — localStorage tabanlı demo implementasyonu
+// MockAgyionClient — localStorage-backed, contract-faithful simulation
 // ---------------------------------------------------------------------------
 
-const MOCK_KEY = "hak.mock.v1";
-/** Demo temposu: 1 ledger ≈ 1 saniye (testnet ~5 sn; UI canlı sayaç için 1 sn) */
-export const MOCK_LEDGER_MS = 1000;
+const STORE_KEY = "agyion.mock.v2";
+const LEDGERS_PER_DAY = 17280;
 
 interface MockStore {
-  epochMs: number; // mock ledger saatinin duvar saati başlangıcı
+  epochMs: number;
   baseLedger: number;
-  nextListingId: string; // bigint serileştirme
-  nextCapsuleId: string;
-  venueSecret: string; // demo venue "ed25519" gizli anahtarı (hex)
-  listings: MockListingRec[];
-  capsules: CapsuleRec[];
+  nextFadeId: string;
+  nextPodId: string;
+  nextTriggerId: string;
+  nextMandateId: string;
+  fades: MockFade[];
+  pods: MockPod[];
+  triggers: MockTrigger[];
+  mandates: MockMandate[];
 }
 
-interface MockListingRec extends Omit<Listing, "id"> {
+// bigint → string for JSON
+type MockFade = Omit<Fade, "id" | "pot" | "start_price" | "floor_price" | "slope_num" | "slope_den"> & {
   id: string;
-  settlement?: {
-    price: bigint;
-    claimantPaid: bigint; // claimant → seller
-    claimantReceived: bigint; // pot → claimant (negatif fiyat)
-    sellerReceived: bigint; // kalan pot → seller
+  pot: string;
+  start_price: string;
+  floor_price: string;
+  slope_num: string;
+  slope_den: string;
+};
+type MockPod = Omit<Pod, "id" | "amount"> & { id: string; amount: string };
+type MockTrigger = Omit<Trigger, "id" | "amount"> & { id: string; amount: string };
+type MockMandate = Omit<Mandate, "id" | "max_per_tx" | "daily_cap" | "daily_used"> & {
+  id: string;
+  max_per_tx: string;
+  daily_cap: string;
+  daily_used: string;
+};
+
+function emptyStore(): MockStore {
+  return {
+    epochMs: Date.now(),
+    baseLedger: 1000,
+    nextFadeId: "1",
+    nextPodId: "1",
+    nextTriggerId: "1",
+    nextMandateId: "1",
+    fades: [],
+    pods: [],
+    triggers: [],
+    mandates: [],
   };
-}
-
-interface CapsuleRec extends Omit<Capsule, "id"> {
-  id: string;
-}
-
-function hexRandom(bytes: number): string {
-  const a = new Uint8Array(bytes);
-  if (typeof crypto !== "undefined" && crypto.getRandomValues) crypto.getRandomValues(a);
-  else for (let i = 0; i < bytes; i++) a[i] = Math.floor(Math.random() * 256);
-  return Array.from(a, (b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-async function sha256Hex(input: string): Promise<string> {
-  const data = new TextEncoder().encode(input);
-  if (typeof crypto !== "undefined" && crypto.subtle) {
-    const h = await crypto.subtle.digest("SHA-256", data);
-    return Array.from(new Uint8Array(h), (b) => b.toString(16).padStart(2, "0")).join("");
-  }
-  // Çok basit fallback (demo ortamı; WebCrypto her modern tarayıcıda var)
-  let h1 = 0x811c9dc5;
-  for (let i = 0; i < data.length; i++) {
-    h1 ^= data[i];
-    h1 = Math.imul(h1, 0x01000193) >>> 0;
-  }
-  return h1.toString(16).padStart(8, "0").repeat(8).slice(0, 64);
-}
-
-/** Mock venue imzası: sha256(venueSecret || listing_id || claimant || ts) — payload §3.2 ile aynı sıra */
-async function mockVenueSig(secret: string, listingId: bigint, claimant: string, ts: bigint): Promise<string> {
-  return sha256Hex(`${secret}||${listingId.toString()}||${claimant}||${ts.toString()}`);
 }
 
 function loadStore(): MockStore {
-  if (typeof window === "undefined") return freshStore();
-  const raw = window.localStorage.getItem(MOCK_KEY);
-  if (raw) {
-    try {
-      return JSON.parse(raw, (_k, v) =>
-        typeof v === "string" && /^-?\d+n$/.test(v) ? BigInt(v.slice(0, -1)) : v,
-      ) as MockStore;
-    } catch {
-      /* bozuksa sıfırla */
-    }
+  if (typeof window === "undefined") return emptyStore();
+  try {
+    const raw = window.localStorage.getItem(STORE_KEY);
+    if (!raw) return emptyStore();
+    return { ...emptyStore(), ...(JSON.parse(raw) as MockStore) };
+  } catch {
+    return emptyStore();
   }
-  const s = freshStore();
-  saveStore(s);
-  return s;
 }
 
-function freshStore(): MockStore {
-  return {
-    epochMs: Date.now(),
-    baseLedger: 1_000_000,
-    nextListingId: "1",
-    nextCapsuleId: "1",
-    venueSecret: hexRandom(32),
-    listings: [],
-    capsules: [],
-  };
-}
+/** Mock ledger tempo: 1 ledger per second (demo pace; testnet is ~5s) */
+const MOCK_SECONDS_PER_LEDGER = 1;
 
-function saveStore(s: MockStore): void {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(
-    MOCK_KEY,
-    JSON.stringify(s, (_k, v) => (typeof v === "bigint" ? `${v}n` : v)),
-  );
-}
-
-export class MockHakClient implements HakClient {
+export class MockAgyionClient implements AgyionClient {
   private store: MockStore;
 
   constructor() {
@@ -272,42 +272,49 @@ export class MockHakClient implements HakClient {
   }
 
   private persist(): void {
-    saveStore(this.store);
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(STORE_KEY, JSON.stringify(this.store));
   }
 
-  currentLedger(): Promise<number> {
-    const { epochMs, baseLedger } = this.store;
-    return Promise.resolve(baseLedger + Math.floor((Date.now() - epochMs) / MOCK_LEDGER_MS));
+  async currentLedger(): Promise<number> {
+    return (
+      this.store.baseLedger +
+      Math.floor((Date.now() - this.store.epochMs) / (MOCK_SECONDS_PER_LEDGER * 1000))
+    );
   }
 
-  /** Demo venue açık anahtarı (hex BytesN<32>) — satıcı formu bunu kaydeder */
-  async venuePubkey(): Promise<string> {
-    return sha256Hex(`pub||${this.store.venueSecret}`);
-  }
-
-  /** Demo yardımcı: teslim ekranında "imza üret" butonu bunu kullanır (gerçekte venue cihazı imzalar) */
-  async mockVenueSign(listingId: bigint, claimant: string, ts: bigint): Promise<string> {
-    return mockVenueSig(this.store.venueSecret, listingId, claimant, ts);
-  }
-
-  /** Demo: mock kayıtlarını sıfırla */
-  reset(): void {
-    this.store = freshStore();
+  /** Demo helper: jump the mock ledger forward */
+  advanceLedgers(n: number): void {
+    const now = Date.now();
+    const cur =
+      this.store.baseLedger +
+      Math.floor((now - this.store.epochMs) / (MOCK_SECONDS_PER_LEDGER * 1000));
+    this.store.baseLedger = cur + n;
+    this.store.epochMs = now;
     this.persist();
   }
 
-  private findListing(listing_id: bigint): MockListingRec {
-    const rec = this.store.listings.find((l) => BigInt(l.id) === listing_id);
-    if (!rec) throw new HakError(HakErrorCode.ListingYok, `İlan bulunamadı: #${listing_id}`);
-    return rec;
+  // ---- Fade ----
+
+  private findFade(id: bigint): MockFade {
+    const f = this.store.fades.find((x) => BigInt(x.id) === id);
+    if (!f) throw new AgyionError(AgyionErrorCode.NotFound, `Fade not found: #${id}`);
+    return f;
   }
 
-  private toListing(rec: MockListingRec): Listing {
-    return { ...rec, id: BigInt(rec.id) };
+  private toFade(f: MockFade): Fade {
+    return {
+      ...f,
+      id: BigInt(f.id),
+      pot: BigInt(f.pot),
+      start_price: BigInt(f.start_price),
+      floor_price: BigInt(f.floor_price),
+      slope_num: BigInt(f.slope_num),
+      slope_den: BigInt(f.slope_den),
+    };
   }
 
-  // ---- SPEC §3.2: create_listing ----
-  async create_listing(
+  async create_fade(
     seller: string,
     asset: string,
     pot: bigint,
@@ -316,27 +323,35 @@ export class MockHakClient implements HakClient {
     slope_num: bigint,
     slope_den: bigint,
     duration_ledgers: number,
-    pickup_window: number,
+    handoff_window: number,
     venue_pubkey: string,
   ): Promise<bigint> {
-    if (slope_den === 0n) throw new HakError(HakErrorCode.DurumUygunDegil, "slope_den sıfır olamaz");
-    const start = await this.currentLedger();
-    const id = BigInt(this.store.nextListingId);
-    this.store.nextListingId = (id + 1n).toString();
-    this.store.listings.push({
+    if (pot <= 0n || start_price < floor_price)
+      throw new AgyionError(AgyionErrorCode.InvalidAmount, "pot<=0 or start_price<floor_price");
+    if (floor_price < -pot)
+      throw new AgyionError(AgyionErrorCode.InvalidAmount, "floor_price < -pot (payout cap)");
+    if (slope_den <= 0n || slope_num < 0n || duration_ledgers === 0 || handoff_window === 0)
+      throw new AgyionError(AgyionErrorCode.InvalidCurve, "Invalid curve parameters");
+    if (/^0+$/.test(venue_pubkey))
+      throw new AgyionError(AgyionErrorCode.BadSignature, "Zero venue pubkey");
+
+    const now = await this.currentLedger();
+    const id = BigInt(this.store.nextFadeId);
+    this.store.nextFadeId = (id + 1n).toString();
+    this.store.fades.push({
       id: id.toString(),
       seller,
       asset,
-      pot,
-      start_price,
-      floor_price,
-      start_ledger: start,
-      deadline_ledger: start + duration_ledgers,
-      pickup_window,
-      slope_num,
-      slope_den,
-      venue_pubkey,
-      state: LISTING_STATE.Acik,
+      pot: pot.toString(),
+      start_price: start_price.toString(),
+      floor_price: floor_price.toString(),
+      start_ledger: now,
+      deadline_ledger: now + duration_ledgers,
+      handoff_window,
+      slope_num: slope_num.toString(),
+      slope_den: slope_den.toString(),
+      venue_pubkey: venue_pubkey.toLowerCase(),
+      state: FADE_STATE.Open,
       claimant: null,
       claimed_at: null,
     });
@@ -344,149 +359,289 @@ export class MockHakClient implements HakClient {
     return id;
   }
 
-  // ---- SPEC §3.2: price_at (view) ----
-  async price_at(listing_id: bigint): Promise<bigint> {
-    const rec = this.findListing(listing_id);
-    return priceAtLedger(rec, await this.currentLedger());
+  async fade_price(fade_id: bigint): Promise<bigint> {
+    const f = this.findFade(fade_id);
+    return priceAtLedger(this.toFade(f), await this.currentLedger());
   }
 
-  // ---- SPEC §3.2: claim ----
-  async claim(listing_id: bigint, claimant: string): Promise<void> {
-    const rec = this.findListing(listing_id);
-    if (rec.state !== LISTING_STATE.Acik)
-      throw new HakError(HakErrorCode.DurumUygunDegil, "İlan artık açık değil");
+  async claim(fade_id: bigint, claimant: string): Promise<void> {
+    const f = this.findFade(fade_id);
+    if (f.state !== FADE_STATE.Open)
+      throw new AgyionError(AgyionErrorCode.InvalidState, "Fade is no longer open");
     const now = await this.currentLedger();
-    if (now > rec.deadline_ledger)
-      throw new HakError(HakErrorCode.DeadlineGecmis, "Son saat doldu; claim kapanmıştır");
-    rec.state = LISTING_STATE.ClaimEdildi;
-    rec.claimant = claimant;
-    rec.claimed_at = now;
+    if (now > f.deadline_ledger)
+      throw new AgyionError(AgyionErrorCode.InvalidState, "Deadline passed; the fade fell to refund");
+    f.state = FADE_STATE.Claimed;
+    f.claimant = claimant;
+    f.claimed_at = now;
     this.persist();
   }
 
-  // ---- SPEC §3.2: confirm_pickup (venue imzası: listing_id||claimant||ts) ----
-  async confirm_pickup(listing_id: bigint, ts: bigint, sig: string): Promise<void> {
-    const rec = this.findListing(listing_id);
-    if (rec.state !== LISTING_STATE.ClaimEdildi || rec.claimant == null || rec.claimed_at == null)
-      throw new HakError(HakErrorCode.DurumUygunDegil, "Teslim için önce claim gerekir");
-    const beklenenPub = await this.venuePubkey();
-    if (rec.venue_pubkey !== beklenenPub)
-      throw new HakError(HakErrorCode.ImzaGecersiz, "Venue anahtarı bu mock oturuma ait değil");
-    const beklenen = await mockVenueSig(this.store.venueSecret, listing_id, rec.claimant, ts);
-    if (sig.trim().toLowerCase() !== beklenen)
-      throw new HakError(HakErrorCode.ImzaGecersiz, "Venue imzası doğrulanamadı");
-
-    // Settle — SPEC: fiyat price_at(claimed_at) üzerinden:
-    //   fiyat>0 claimant→seller, fiyat<0 pot→claimant, kalan pot seller'a
-    const fiyat = priceAtLedger(rec, rec.claimed_at);
-    let claimantPaid = 0n;
-    let claimantReceived = 0n;
-    let sellerReceived = 0n;
-    if (fiyat > 0n) {
-      claimantPaid = fiyat;
-      sellerReceived = rec.pot; // pot dokunulmadan seller'a döner
-    } else if (fiyat < 0n) {
-      claimantReceived = -fiyat > rec.pot ? rec.pot : -fiyat; // pot'u aşamaz
-      sellerReceived = rec.pot - claimantReceived; // kalan pot
-    } else {
-      sellerReceived = rec.pot;
-    }
-    rec.settlement = { price: fiyat, claimantPaid, claimantReceived, sellerReceived };
-    rec.state = LISTING_STATE.TeslimTamam;
-    this.persist();
-  }
-
-  // ---- SPEC §3.2: iade — kurallı geri dönüş, takdir yok, herkes çağırabilir ----
-  async iade(listing_id: bigint): Promise<void> {
-    const rec = this.findListing(listing_id);
+  async confirm_handoff(fade_id: bigint, ts: bigint, sig: string): Promise<void> {
+    const f = this.findFade(fade_id);
+    if (f.state !== FADE_STATE.Claimed || !f.claimant || f.claimed_at === null)
+      throw new AgyionError(AgyionErrorCode.InvalidState, "Fade is not in claimed state");
     const now = await this.currentLedger();
-    const deadlineDolduClaimYok = rec.state === LISTING_STATE.Acik && now > rec.deadline_ledger;
-    const pencereDolduTeslimYok =
-      rec.state === LISTING_STATE.ClaimEdildi &&
-      rec.claimed_at != null &&
-      now > rec.claimed_at + rec.pickup_window;
-    if (!deadlineDolduClaimYok && !pencereDolduTeslimYok)
-      throw new HakError(
-        HakErrorCode.IadeKosuluOlgusmamis,
-        "İade koşulu oluşmadı: deadline dolmadı veya teslim penceresi sürüyor",
+    if (now > f.claimed_at + f.handoff_window)
+      throw new AgyionError(
+        AgyionErrorCode.InvalidState,
+        "Handoff window elapsed; on a no-show, refund wins",
       );
-    // Pot her durumda seller'a döner (kural herkes için aynı)
-    rec.settlement = { price: 0n, claimantPaid: 0n, claimantReceived: 0n, sellerReceived: rec.pot };
-    rec.state = LISTING_STATE.IadeEdildi;
+    const payload = handoffPayload(fade_id, f.claimant, ts);
+    const sigBuf = Buffer.from(sig.trim().toLowerCase(), "hex");
+    if (!rawEd25519Verify(f.venue_pubkey, payload, sigBuf))
+      throw new AgyionError(AgyionErrorCode.BadSignature, "Venue signature could not be verified");
+    f.state = FADE_STATE.HandedOff;
     this.persist();
   }
 
-  // ---- SPEC §3.2: create_capsule ----
-  async create_capsule(
+  async refund(fade_id: bigint): Promise<void> {
+    const f = this.findFade(fade_id);
+    const now = await this.currentLedger();
+    const ok =
+      (f.state === FADE_STATE.Open && now > f.deadline_ledger) ||
+      (f.state === FADE_STATE.Claimed &&
+        f.claimed_at !== null &&
+        now > f.claimed_at + f.handoff_window);
+    if (!ok)
+      throw new AgyionError(AgyionErrorCode.DeadlinePassed, "Refund condition not met yet");
+    f.state = FADE_STATE.Refunded;
+    this.persist();
+  }
+
+  async get_fade(fade_id: bigint): Promise<Fade | null> {
+    const f = this.store.fades.find((x) => BigInt(x.id) === fade_id);
+    return f ? this.toFade(f) : null;
+  }
+
+  async listFades(): Promise<Fade[]> {
+    return this.store.fades.map((f) => this.toFade(f));
+  }
+
+  // ---- Pod ----
+
+  async create_pod(
     funder: string,
     asset: string,
     amount: bigint,
     unlock_ledger: number,
     key_hash: string,
   ): Promise<bigint> {
-    const id = BigInt(this.store.nextCapsuleId);
-    this.store.nextCapsuleId = (id + 1n).toString();
-    this.store.capsules.push({
+    if (amount <= 0n) throw new AgyionError(AgyionErrorCode.InvalidAmount, "amount<=0");
+    const id = BigInt(this.store.nextPodId);
+    this.store.nextPodId = (id + 1n).toString();
+    this.store.pods.push({
       id: id.toString(),
       funder,
       asset,
-      amount,
+      amount: amount.toString(),
       unlock_ledger,
-      key_hash,
-      state: CAPSULE_STATE.Gomulu,
+      key_hash: key_hash.toLowerCase(),
+      state: 0,
     });
     this.persist();
     return id;
   }
 
-  // ---- SPEC §3.2: claim_capsule (sha256(preimage)==key_hash && ledger>=unlock_ledger) ----
-  async claim_capsule(capsule_id: bigint, preimage: string, recipient: string): Promise<void> {
-    const rec = this.store.capsules.find((c) => BigInt(c.id) === capsule_id);
-    if (!rec) throw new HakError(HakErrorCode.CapsuleYok, `Kapsül bulunamadı: #${capsule_id}`);
-    if (rec.state !== CAPSULE_STATE.Gomulu)
-      throw new HakError(HakErrorCode.DurumUygunDegil, "Kapsül zaten açılmış");
-    if ((await this.currentLedger()) < rec.unlock_ledger)
-      throw new HakError(HakErrorCode.KapsulKilitli, "Kapsül kilit süresi dolmadı");
-    if ((await sha256Hex(preimage)) !== rec.key_hash.toLowerCase())
-      throw new HakError(HakErrorCode.PreimageYanlis, "Preimage anahtar hash'i ile eşleşmiyor");
-    void recipient; // recipient tx gönderene bağlı (front-running koruması — F2); mock'ta kayda geçer
-    rec.state = CAPSULE_STATE.Acildi;
+  async claim_pod(pod_id: bigint, preimage: string, recipient: string): Promise<void> {
+    const p = this.store.pods.find((x) => BigInt(x.id) === pod_id);
+    if (!p) throw new AgyionError(AgyionErrorCode.NotFound, `Pod not found: #${pod_id}`);
+    if (p.state !== 0)
+      throw new AgyionError(AgyionErrorCode.InvalidState, "Pod already opened");
+    const now = await this.currentLedger();
+    if (now < p.unlock_ledger)
+      throw new AgyionError(AgyionErrorCode.Locked, `Unlock ledger not reached: ${p.unlock_ledger}`);
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(preimage));
+    const hex = Buffer.from(digest).toString("hex");
+    if (hex !== p.key_hash)
+      throw new AgyionError(AgyionErrorCode.BadSignature, "sha256(preimage) != key_hash");
+    void recipient; // the mock does not move balances
+    p.state = 1;
     this.persist();
   }
 
-  async getListing(listing_id: bigint): Promise<Listing | null> {
-    const rec = this.store.listings.find((l) => BigInt(l.id) === listing_id);
-    return rec ? this.toListing(rec) : null;
+  async get_pod(pod_id: bigint): Promise<Pod | null> {
+    const p = this.store.pods.find((x) => BigInt(x.id) === pod_id);
+    return p ? { ...p, id: BigInt(p.id), amount: BigInt(p.amount) } : null;
   }
 
-  /** Mock'a özgü: en son ilan + settle dökümü (UI tek ekran akışı için) */
-  async getLatestListing(): Promise<(Listing & { settlement?: MockListingRec["settlement"] }) | null> {
-    const rec = this.store.listings[this.store.listings.length - 1];
-    return rec ? { ...this.toListing(rec), settlement: rec.settlement } : null;
+  async listPods(): Promise<Pod[]> {
+    return this.store.pods.map((p) => ({ ...p, id: BigInt(p.id), amount: BigInt(p.amount) }));
   }
 
-  async getCapsule(capsule_id: bigint): Promise<Capsule | null> {
-    const rec = this.store.capsules.find((c) => BigInt(c.id) === capsule_id);
+  // ---- Trigger ----
+
+  async create_trigger(
+    funder: string,
+    asset: string,
+    amount: bigint,
+    beneficiary: string,
+    attester_pubkey: string,
+    deadline_ledger: number,
+  ): Promise<bigint> {
+    if (amount <= 0n) throw new AgyionError(AgyionErrorCode.InvalidAmount, "amount<=0");
+    if (/^0+$/.test(attester_pubkey))
+      throw new AgyionError(AgyionErrorCode.BadSignature, "Zero attester pubkey");
+    const id = BigInt(this.store.nextTriggerId);
+    this.store.nextTriggerId = (id + 1n).toString();
+    this.store.triggers.push({
+      id: id.toString(),
+      funder,
+      asset,
+      amount: amount.toString(),
+      beneficiary,
+      attester_pubkey: attester_pubkey.toLowerCase(),
+      deadline_ledger,
+      state: TRIGGER_STATE.Pending,
+    });
+    this.persist();
+    return id;
+  }
+
+  async attest(trigger_id: bigint, ts: bigint, sig: string): Promise<void> {
+    const t = this.store.triggers.find((x) => BigInt(x.id) === trigger_id);
+    if (!t) throw new AgyionError(AgyionErrorCode.NotFound, `Trigger not found: #${trigger_id}`);
+    if (t.state !== TRIGGER_STATE.Pending)
+      throw new AgyionError(AgyionErrorCode.InvalidState, "Trigger already resolved");
+    const now = await this.currentLedger();
+    if (now > t.deadline_ledger)
+      throw new AgyionError(AgyionErrorCode.DeadlinePassed, "Attestation window closed; falls to refund");
+    const payload = attestPayload(trigger_id, t.beneficiary, ts);
+    const sigBuf = Buffer.from(sig.trim().toLowerCase(), "hex");
+    if (!rawEd25519Verify(t.attester_pubkey, payload, sigBuf))
+      throw new AgyionError(AgyionErrorCode.BadSignature, "Attester signature could not be verified");
+    t.state = TRIGGER_STATE.Executed;
+    this.persist();
+  }
+
+  async refund_trigger(trigger_id: bigint): Promise<void> {
+    const t = this.store.triggers.find((x) => BigInt(x.id) === trigger_id);
+    if (!t) throw new AgyionError(AgyionErrorCode.NotFound, `Trigger not found: #${trigger_id}`);
+    if (t.state !== TRIGGER_STATE.Pending)
+      throw new AgyionError(AgyionErrorCode.InvalidState, "Trigger already resolved");
+    const now = await this.currentLedger();
+    if (now <= t.deadline_ledger)
+      throw new AgyionError(AgyionErrorCode.Locked, "Deadline not passed yet; escrow stays locked");
+    t.state = TRIGGER_STATE.Refunded;
+    this.persist();
+  }
+
+  async get_trigger(trigger_id: bigint): Promise<Trigger | null> {
+    const rec = this.store.triggers.find((t) => BigInt(t.id) === trigger_id);
     return rec ? { ...rec, id: BigInt(rec.id) } : null;
+  }
+
+  async listTriggers(): Promise<Trigger[]> {
+    return this.store.triggers.map((t) => ({ ...t, id: BigInt(t.id) }));
+  }
+
+  // ---- Envoy ----
+
+  async create_mandate(
+    owner: string,
+    agent_pubkey: string,
+    max_per_tx: bigint,
+    daily_cap: bigint,
+    valid_until: number,
+  ): Promise<bigint> {
+    if (max_per_tx <= 0n || daily_cap <= 0n || max_per_tx > daily_cap)
+      throw new AgyionError(AgyionErrorCode.InvalidAmount, "Caps must be positive and per-tx <= daily");
+    const now = await this.currentLedger();
+    if (valid_until <= now)
+      throw new AgyionError(AgyionErrorCode.InvalidInput, "valid_until must be in the future");
+    const id = BigInt(this.store.nextMandateId);
+    this.store.nextMandateId = (id + 1n).toString();
+    this.store.mandates.push({
+      id: id.toString(),
+      owner,
+      agent_pubkey: agent_pubkey.toLowerCase(),
+      max_per_tx,
+      daily_cap,
+      daily_used: 0n,
+      window_start: now,
+      valid_until,
+      revoked: false,
+    });
+    this.persist();
+    return id;
+  }
+
+  async envoy_claim(
+    mandate_id: bigint,
+    fade_id: bigint,
+    ts: bigint,
+    agent_sig: string,
+  ): Promise<void> {
+    const m = this.store.mandates.find((x) => BigInt(x.id) === mandate_id);
+    if (!m) throw new AgyionError(AgyionErrorCode.NotFound, `Mandate not found: #${mandate_id}`);
+    if (m.revoked) throw new AgyionError(AgyionErrorCode.Unauthorized, "Mandate revoked");
+    const now = await this.currentLedger();
+    if (now > m.valid_until)
+      throw new AgyionError(AgyionErrorCode.MandateExpired, "Mandate expired");
+    const payload = envoyPayload(mandate_id, fade_id, ts);
+    const sigBuf = Buffer.from(agent_sig.trim().toLowerCase(), "hex");
+    if (!rawEd25519Verify(m.agent_pubkey, payload, sigBuf))
+      throw new AgyionError(AgyionErrorCode.BadSignature, "Agent signature could not be verified");
+
+    const fade = this.findFade(fade_id);
+    if (fade.state !== FADE_STATE.Open)
+      throw new AgyionError(AgyionErrorCode.InvalidState, "Fade is no longer open");
+    if (now > fade.deadline_ledger)
+      throw new AgyionError(AgyionErrorCode.DeadlinePassed, "Fade deadline passed");
+    const price = priceAtLedger(fade, now);
+    if (price > m.max_per_tx)
+      throw new AgyionError(AgyionErrorCode.CapExceeded, "Price above max_per_tx — the contract said no");
+    // day window rollover
+    if (now > m.window_start + LEDGERS_PER_DAY) {
+      m.window_start = now;
+      m.daily_used = 0n;
+    }
+    if (m.daily_used + price > m.daily_cap)
+      throw new AgyionError(AgyionErrorCode.CapExceeded, "Daily cap would be exceeded — the contract said no");
+
+    m.daily_used += price;
+    fade.state = FADE_STATE.Claimed;
+    fade.claimant = m.owner; // recipient is fixed to the owner
+    fade.claimed_at = now;
+    this.persist();
+  }
+
+  async revoke_mandate(owner: string, mandate_id: bigint): Promise<void> {
+    const m = this.store.mandates.find((x) => BigInt(x.id) === mandate_id);
+    if (!m) throw new AgyionError(AgyionErrorCode.NotFound, `Mandate not found: #${mandate_id}`);
+    if (m.owner !== owner)
+      throw new AgyionError(AgyionErrorCode.Unauthorized, "Only the owner can revoke");
+    m.revoked = true;
+    this.persist();
+  }
+
+  async get_mandate(mandate_id: bigint): Promise<Mandate | null> {
+    const m = this.store.mandates.find((x) => BigInt(x.id) === mandate_id);
+    return m ? { ...m, id: BigInt(m.id) } : null;
+  }
+
+  async listMandates(): Promise<Mandate[]> {
+    return this.store.mandates.map((m) => ({ ...m, id: BigInt(m.id) }));
   }
 }
 
 // ---------------------------------------------------------------------------
-// SorobanHakClient — gerçek soroban-testnet RPC binding
-//
-// `stellar contract bindings typescript` ile üretilen paket
-// (app/lib/hak-bindings, kontrat spec'inden otomatik) üzerinden çalışır:
-//   - view'lar (price_at, get_listing, get_capsule): simulate, imza gerekmez
-//   - invoke'lar: AssembledTransaction.simulate → signTransaction → send → poll
-//     (SDK'nın signAndSend'i poll'u kendisi yapar)
-//
-// SPEC §3.2 imzaları birebir karşılanır. getListing/getCapsule, SPEC'e ek
-// kontrat view'ları `get_listing`/`get_capsule` üzerinden okunur (salt-okur;
-// §3.2 imzalarına dokunulmadı — entegrasyon raporuna bak).
-//
-// Not: invoke'larda kontrat require_auth kullanır; tx kaynağı signer adresidir.
-// claimant/seller != signer ise SDK signAuthEntry ister (multi-party auth);
-// demo akışı tek kullanıcı varsayar.
+// Raw ed25519 verify helper (mock) — verifies against a raw 32-byte pubkey,
+// exactly what the contract's ed25519_verify does.
+// ---------------------------------------------------------------------------
+
+function rawEd25519Verify(hexPub: string, payload: Buffer, sig: Buffer): boolean {
+  if (sig.length !== 64 || hexPub.length !== 64) return false;
+  try {
+    const kp = Keypair.fromPublicKey(StrKey.encodeEd25519PublicKey(Buffer.from(hexPub, "hex")));
+    return kp.verify(payload, sig);
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SorobanAgyionClient — real soroban-testnet RPC via generated bindings
 // ---------------------------------------------------------------------------
 
 export interface SorobanConfig {
@@ -496,60 +651,84 @@ export interface SorobanConfig {
   signer: TransactionSigner;
 }
 
-/** Hex string → Buffer (bindings BytesN/Bytes argümanları Buffer ister) */
-function hexToBuffer(hex: string, beklenen?: number): Buffer {
-  const temiz = hex.trim().toLowerCase().replace(/^0x/, "");
-  const buf = Buffer.from(temiz, "hex");
-  if (beklenen !== undefined && buf.length !== beklenen)
-    throw new HakError(
-      HakErrorCode.ImzaGecersiz,
-      `BytesN<${beklenen}> uzunluğu hatalı: ${buf.length} bayt`,
+function hexToBuffer(hex: string, expected?: number): Buffer {
+  const clean = hex.trim().toLowerCase().replace(/^0x/, "");
+  const buf = Buffer.from(clean, "hex");
+  if (expected !== undefined && buf.length !== expected)
+    throw new AgyionError(
+      AgyionErrorCode.InvalidInput,
+      `BytesN<${expected}> wrong length: ${buf.length} bytes`,
     );
   return buf;
 }
 
-/** Zincir (bindings) Listing tipini istemci Listing tipine çevirir */
-function zincirdenListing(id: bigint, l: ZincirListing): Listing {
+function fadeFromChain(id: bigint, f: ChainFade): Fade {
   return {
     id,
-    seller: l.seller,
-    asset: l.asset,
-    pot: l.pot,
-    start_price: l.start_price,
-    floor_price: l.floor_price,
-    start_ledger: l.start_ledger,
-    deadline_ledger: l.deadline_ledger,
-    pickup_window: l.pickup_window,
-    slope_num: l.slope_num,
-    slope_den: l.slope_den,
-    venue_pubkey: Buffer.from(l.venue_pubkey).toString("hex"),
-    state: l.state as ListingState,
-    claimant: l.claimant ?? null,
-    claimed_at: l.claimed_at ?? null,
+    seller: f.seller,
+    asset: f.asset,
+    pot: f.pot,
+    start_price: f.start_price,
+    floor_price: f.floor_price,
+    start_ledger: f.start_ledger,
+    deadline_ledger: f.deadline_ledger,
+    handoff_window: f.handoff_window,
+    slope_num: f.slope_num,
+    slope_den: f.slope_den,
+    venue_pubkey: Buffer.from(f.venue_pubkey).toString("hex"),
+    state: f.state as FadeState,
+    claimant: f.claimant ?? null,
+    claimed_at: f.claimed_at ?? null,
   };
 }
 
-function zincirdenCapsule(id: bigint, c: ZincirCapsule): Capsule {
+function podFromChain(id: bigint, p: ChainPod): Pod {
   return {
     id,
-    funder: c.funder,
-    asset: c.asset,
-    amount: c.amount,
-    unlock_ledger: c.unlock_ledger,
-    key_hash: Buffer.from(c.key_hash).toString("hex"),
-    state: c.state as 0 | 1,
+    funder: p.funder,
+    asset: p.asset,
+    amount: p.amount,
+    unlock_ledger: p.unlock_ledger,
+    key_hash: Buffer.from(p.key_hash).toString("hex"),
+    state: p.state as 0 | 1,
   };
 }
 
-/** Kontrat "Bulunamadi" (Hata=1) döndürdüyse true — getListing/getCapsule null'a çevirir */
-function bulunamadiMi(e: unknown): boolean {
+function triggerFromChain(id: bigint, t: ChainTrigger): Trigger {
+  return {
+    id,
+    funder: t.funder,
+    asset: t.asset,
+    amount: t.amount,
+    beneficiary: t.beneficiary,
+    attester_pubkey: Buffer.from(t.attester_pubkey).toString("hex"),
+    deadline_ledger: t.deadline_ledger,
+    state: t.state as 0 | 1 | 2,
+  };
+}
+
+function mandateFromChain(id: bigint, m: ChainMandate): Mandate {
+  return {
+    id,
+    owner: m.owner,
+    agent_pubkey: Buffer.from(m.agent_pubkey).toString("hex"),
+    max_per_tx: m.max_per_tx,
+    daily_cap: m.daily_cap,
+    daily_used: m.daily_used,
+    window_start: m.window_start,
+    valid_until: m.valid_until,
+    revoked: m.revoked,
+  };
+}
+
+function isNotFound(e: unknown): boolean {
   const msg = e instanceof Error ? e.message : String(e);
-  return msg.includes("Bulunamadi") || /error.*\b1\b/i.test(msg);
+  return msg.includes("NotFound") || /error.*\b1\b/i.test(msg);
 }
 
-export class SorobanHakClient implements HakClient {
+export class SorobanAgyionClient implements AgyionClient {
   private server: rpc.Server;
-  private bindingsP: Promise<HakBindingsClient> | null = null;
+  private bindingsP: Promise<BindingsClient> | null = null;
 
   constructor(private cfg: SorobanConfig) {
     this.server = new rpc.Server(cfg.rpcUrl, {
@@ -557,16 +736,12 @@ export class SorobanHakClient implements HakClient {
     });
   }
 
-  /**
-   * Bindings client'ı tembel (lazy) kurar: signer adresi async olduğu için
-   * constructor'da değil ilk çağrıda çözülür. Kurulum başarısız olursa
-   * sonraki çağrı yeniden dener.
-   */
-  private bindings(): Promise<HakBindingsClient> {
+  /** Lazy bindings init: the signer address resolves async on first call. */
+  private bindings(): Promise<BindingsClient> {
     if (!this.bindingsP) {
       const p = (async () => {
         const publicKey = await this.cfg.signer.address();
-        return new HakBindingsClient({
+        return new BindingsClient({
           contractId: this.cfg.contractId,
           networkPassphrase: this.cfg.networkPassphrase,
           rpcUrl: this.cfg.rpcUrl,
@@ -593,9 +768,9 @@ export class SorobanHakClient implements HakClient {
     return latest.sequence;
   }
 
-  // ---- SPEC §3.2 imzaları ----
+  // ---- Fade ----
 
-  async create_listing(
+  async create_fade(
     seller: string,
     asset: string,
     pot: bigint,
@@ -604,11 +779,11 @@ export class SorobanHakClient implements HakClient {
     slope_num: bigint,
     slope_den: bigint,
     duration_ledgers: number,
-    pickup_window: number,
+    handoff_window: number,
     venue_pubkey: string,
   ): Promise<bigint> {
     const c = await this.bindings();
-    const tx = await c.create_listing({
+    const tx = await c.create_fade({
       seller,
       asset,
       pot,
@@ -617,42 +792,55 @@ export class SorobanHakClient implements HakClient {
       slope_num,
       slope_den,
       duration_ledgers,
-      pickup_window,
+      handoff_window,
       venue_pubkey: hexToBuffer(venue_pubkey, 32),
     });
     await tx.signAndSend();
     return tx.result.unwrap();
   }
 
-  /** View: lineer geriye akan fiyat, floor'da durur (simulate, imza yok) */
-  async price_at(listing_id: bigint): Promise<bigint> {
+  async fade_price(fade_id: bigint): Promise<bigint> {
     const c = await this.bindings();
-    const tx = await c.price_at({ listing_id });
+    const tx = await c.fade_price({ fade_id });
     return tx.result;
   }
 
-  async claim(listing_id: bigint, claimant: string): Promise<void> {
+  async claim(fade_id: bigint, claimant: string): Promise<void> {
     const c = await this.bindings();
-    const tx = await c.claim({ listing_id, claimant });
-    await tx.signAndSend();
-    tx.result.unwrap(); // kontrat Hata kodunu yüzeye taşır
-  }
-
-  async confirm_pickup(listing_id: bigint, ts: bigint, sig: string): Promise<void> {
-    const c = await this.bindings();
-    const tx = await c.confirm_pickup({ listing_id, ts, sig: hexToBuffer(sig, 64) });
+    const tx = await c.claim({ fade_id, claimant });
     await tx.signAndSend();
     tx.result.unwrap();
   }
 
-  async iade(listing_id: bigint): Promise<void> {
+  async confirm_handoff(fade_id: bigint, ts: bigint, sig: string): Promise<void> {
     const c = await this.bindings();
-    const tx = await c.iade({ listing_id });
+    const tx = await c.confirm_handoff({ fade_id, ts, sig: hexToBuffer(sig, 64) });
     await tx.signAndSend();
     tx.result.unwrap();
   }
 
-  async create_capsule(
+  async refund(fade_id: bigint): Promise<void> {
+    const c = await this.bindings();
+    const tx = await c.refund({ fade_id });
+    await tx.signAndSend();
+    tx.result.unwrap();
+  }
+
+  async get_fade(fade_id: bigint): Promise<Fade | null> {
+    const c = await this.bindings();
+    try {
+      const tx = await c.get_fade({ fade_id });
+      if (tx.result.isErr()) return null;
+      return fadeFromChain(fade_id, tx.result.unwrap());
+    } catch (e) {
+      if (isNotFound(e)) return null;
+      throw rpcWrap("get_fade", e);
+    }
+  }
+
+  // ---- Pod ----
+
+  async create_pod(
     funder: string,
     asset: string,
     amount: bigint,
@@ -660,7 +848,7 @@ export class SorobanHakClient implements HakClient {
     key_hash: string,
   ): Promise<bigint> {
     const c = await this.bindings();
-    const tx = await c.create_capsule({
+    const tx = await c.create_pod({
       funder,
       asset,
       amount,
@@ -671,10 +859,10 @@ export class SorobanHakClient implements HakClient {
     return tx.result.unwrap();
   }
 
-  async claim_capsule(capsule_id: bigint, preimage: string, recipient: string): Promise<void> {
+  async claim_pod(pod_id: bigint, preimage: string, recipient: string): Promise<void> {
     const c = await this.bindings();
-    const tx = await c.claim_capsule({
-      capsule_id,
+    const tx = await c.claim_pod({
+      pod_id,
       preimage: Buffer.from(new TextEncoder().encode(preimage)),
       recipient,
     });
@@ -682,35 +870,126 @@ export class SorobanHakClient implements HakClient {
     tx.result.unwrap();
   }
 
-  // ---- Okuma yardımcıları (SPEC'e ek view'lar: get_listing / get_capsule) ----
-
-  async getListing(listing_id: bigint): Promise<Listing | null> {
+  async get_pod(pod_id: bigint): Promise<Pod | null> {
     const c = await this.bindings();
     try {
-      const tx = await c.get_listing({ listing_id });
-      if (tx.result.isErr()) return null; // Hata::Bulunamadi
-      return zincirdenListing(listing_id, tx.result.unwrap());
+      const tx = await c.get_pod({ pod_id });
+      if (tx.result.isErr()) return null;
+      return podFromChain(pod_id, tx.result.unwrap());
     } catch (e) {
-      if (bulunamadiMi(e)) return null;
-      throw new HakError(
-        HakErrorCode.RpcHatasi,
-        `get_listing simülasyonu başarısız: ${e instanceof Error ? e.message : String(e)}`,
-      );
+      if (isNotFound(e)) return null;
+      throw rpcWrap("get_pod", e);
     }
   }
 
-  async getCapsule(capsule_id: bigint): Promise<Capsule | null> {
+  // ---- Trigger ----
+
+  async create_trigger(
+    funder: string,
+    asset: string,
+    amount: bigint,
+    beneficiary: string,
+    attester_pubkey: string,
+    deadline_ledger: number,
+  ): Promise<bigint> {
+    const c = await this.bindings();
+    const tx = await c.create_trigger({
+      funder,
+      asset,
+      amount,
+      beneficiary,
+      attester_pubkey: hexToBuffer(attester_pubkey, 32),
+      deadline_ledger,
+    });
+    await tx.signAndSend();
+    return tx.result.unwrap();
+  }
+
+  async attest(trigger_id: bigint, ts: bigint, sig: string): Promise<void> {
+    const c = await this.bindings();
+    const tx = await c.attest({ trigger_id, ts, sig: hexToBuffer(sig, 64) });
+    await tx.signAndSend();
+    tx.result.unwrap();
+  }
+
+  async refund_trigger(trigger_id: bigint): Promise<void> {
+    const c = await this.bindings();
+    const tx = await c.refund_trigger({ trigger_id });
+    await tx.signAndSend();
+    tx.result.unwrap();
+  }
+
+  async get_trigger(trigger_id: bigint): Promise<Trigger | null> {
     const c = await this.bindings();
     try {
-      const tx = await c.get_capsule({ capsule_id });
-      if (tx.result.isErr()) return null; // Hata::Bulunamadi
-      return zincirdenCapsule(capsule_id, tx.result.unwrap());
+      const tx = await c.get_trigger({ trigger_id });
+      if (tx.result.isErr()) return null;
+      return triggerFromChain(trigger_id, tx.result.unwrap());
     } catch (e) {
-      if (bulunamadiMi(e)) return null;
-      throw new HakError(
-        HakErrorCode.RpcHatasi,
-        `get_capsule simülasyonu başarısız: ${e instanceof Error ? e.message : String(e)}`,
-      );
+      if (isNotFound(e)) return null;
+      throw rpcWrap("get_trigger", e);
+    }
+  }
+
+  // ---- Envoy ----
+
+  async create_mandate(
+    owner: string,
+    agent_pubkey: string,
+    max_per_tx: bigint,
+    daily_cap: bigint,
+    valid_until: number,
+  ): Promise<bigint> {
+    const c = await this.bindings();
+    const tx = await c.create_mandate({
+      owner,
+      agent_pubkey: hexToBuffer(agent_pubkey, 32),
+      max_per_tx,
+      daily_cap,
+      valid_until,
+    });
+    await tx.signAndSend();
+    return tx.result.unwrap();
+  }
+
+  async envoy_claim(mandate_id: bigint, fade_id: bigint, ts: bigint, agent_sig: string): Promise<void> {
+    const c = await this.bindings();
+    const tx = await c.envoy_claim({
+      mandate_id,
+      fade_id,
+      ts,
+      agent_sig: hexToBuffer(agent_sig, 64),
+    });
+    await tx.signAndSend();
+    tx.result.unwrap();
+  }
+
+  async revoke_mandate(owner: string, mandate_id: bigint): Promise<void> {
+    const c = await this.bindings();
+    const tx = await c.revoke_mandate({ owner, mandate_id });
+    await tx.signAndSend();
+    tx.result.unwrap();
+  }
+
+  async get_mandate(mandate_id: bigint): Promise<Mandate | null> {
+    const c = await this.bindings();
+    try {
+      const tx = await c.get_mandate({ mandate_id });
+      if (tx.result.isErr()) return null;
+      return mandateFromChain(mandate_id, tx.result.unwrap());
+    } catch (e) {
+      if (isNotFound(e)) return null;
+      throw rpcWrap("get_mandate", e);
     }
   }
 }
+
+function rpcWrap(method: string, e: unknown): AgyionError {
+  return new AgyionError(
+    AgyionErrorCode.RpcError,
+    `${method} simulation failed: ${e instanceof Error ? e.message : String(e)}`,
+  );
+}
+
+// Re-export so panels can build payloads without importing two modules
+export { handoffPayload, attestPayload, envoyPayload, Address };
