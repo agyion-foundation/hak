@@ -22,7 +22,8 @@
 
 ## 4. ZK — stub / showcase
 
-- **Status:** Zero-knowledge anonymity is a **stub** in the MVP: no on-chain proof verification; measurement/showcase level only. The design promise ("ZK anonymity for agent-less claims") is **not met** in this release.
+- **Status update (zk-preimage module):** a **working** Groth16/BN254 verifier contract now exists as an independent module (`contracts/zk-preimage`, circom Poseidon preimage circuit, real snarkjs artifacts, ~26.4M CPU instructions per verify, 6 passing on-chain tests) — but it is **not yet wired into Pod claims**, so the per-claim anonymity promise below still stands for the demo flow.
+- **Status:** Zero-knowledge anonymity is a **stub** in the MVP claim flow: the Pod claim path performs no on-chain proof verification; the working verifier is a standalone module (see status update above). The design promise ("ZK anonymity for agent-less claims") is **not met** in this release.
 - **Impact:** All claims are traceable today; no privacy claim is made in the demo.
 - **Roadmap:** ZK membership/quota proofs for agent-less claims, built on Protocol 25's BN254 + Poseidon host functions; go/no-go follows a verification-cost measurement.
 

@@ -1,0 +1,19 @@
+# Agyion — Final Build Status (2026-09-20)
+
+## Verified green (verifier/runs/)
+- Contracts: 4 templates (Fade, Pod, Trigger, Envoy) · `cargo test` **30/30 PASS** · security audit done, 4 fixes applied (refund overflow, Envoy claim cap, Trigger deadline, TTL)
+- Frontend: English, animated (scroll-scrub hero, lifeline, per-template motion) · `npm run build` exit 0, static export in `app/out/` · Playwright E2E pass (mock mode)
+- GitHub `agyion-foundation/hak`: **77/77 text files blob-sha verified** (sweep complete)
+- Cloudflare Worker `agyion`: deployed (API 200) · 107 assets uploaded · workers.dev subdomain enabled → `agyion.jasurbek-rustamov.workers.dev`
+- Docs: README.md, docs/PITCH.md (15 slides + speaker notes), docs/DEMO_SCRIPT.md, docs/LIMITATIONS.md — all English
+- Media: hero.png, og.png, 4 template icons, texture.png, hero-loop.mp4, docs/video/agyion-demo.mp4 (74s cinematic walkthrough, Playwright-recorded)
+- Verifier logs: verifier/runs/ (cargo test, deploy, final)
+
+## Blocked on user side (cannot be done from sandbox)
+1. **Testnet contract deploy** — sandbox cannot reach stellar.org (network unreachable). Run on your machine: `scripts/deploy_testnet.sh` → paste contract ID into `app/.env` + video proof card (`docs/video/build_segments.py` + `assemble.py`, 2 min).
+2. **Visual check of CF worker** — sandbox DNS is poisoned for workers.dev; open `https://agyion.jasurbek-rustamov.workers.dev/` once and share a screenshot.
+3. **Vercel redeploy** — repo is fully synced now; previous failure (missing AppShell/FadePanel) is fixed. npm warnings are harmless.
+4. **Binary uploads** (package-lock.json, docs/video/agyion-demo.mp4) — add via GitHub web upload or local git push.
+
+## Roadmap anchors (post-hackathon)
+Loxias attester marketplace · Nostr bridge · proof-of-innocence · multi-hop offline (regulation-when-ready) · passkey smart wallets · SCF application.
