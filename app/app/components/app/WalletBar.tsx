@@ -1,77 +1,83 @@
 "use client";
 
 /**
- * WalletBar — connect (Wallets Kit) or test-secret field; shows the
- * connected address, network and the current ledger (the lifeline data).
+ * WalletBar — connect via Stellar Wallets Kit, or a test secret in demo mode.
+ * Demo note is explicit (SPEC §4).
  */
 
 import { useState } from "react";
-import { WalletState } from "../lib/useWallet";
-import { CONFIG, IS_MOCK } from "../lib/config";
-import { shortAddress } from "../lib/format";
-import { DarkPill, inputCls } from "../ui";
+import type { WalletState } from "../../lib/useWallet";
+import { shortAddress } from "../../lib/format";
+import { GhostButton, TextInput } from "../ui";
 
-export default function WalletBar({
-  wallet,
-  ledger,
-}: {
-  wallet: WalletState;
-  ledger: number | null;
-}) {
+export default function WalletBar({ wallet }: { wallet: WalletState }) {
   const [secret, setSecret] = useState("");
   const [showSecret, setShowSecret] = useState(false);
 
   return (
-    <header className="flex flex-wrap items-center gap-3 border-b border-hairline py-4">
-      <span className="font-serif text-lg">Agyion</span>
-      <span className="font-mono text-[11px] uppercase tracking-widest text-muted">
-        {IS_MOCK ? "mock" : CONFIG.network}
-      </span>
-
-      <div className="ml-auto flex items-center gap-3">
-        {ledger !== null && (
-          <span className="font-mono text-xs tabular-nums text-muted">
-            ledger {ledger}
-          </span>
-        )}
-        {wallet.address ? (
-          <>
-            <span className="font-mono text-xs text-ink">
-              {shortAddress(wallet.address)}
-              {wallet.demo && <span className="ml-1 text-muted">(test)</span>}
+    <div className="flex flex-wrap items-center gap-3">
+      {wallet.address ? (
+        <>
+          <span
+            className="rounded-full border px-4 py-2 font-mono text-[13px]"
+            style={{ borderColor: "var(--sand)", color: "var(--ink)" }}
+            title={wallet.address}
+          >
+            {shortAddress(wallet.address)}
+            <span className="ml-2 text-[11px] uppercase tracking-[0.1em] text-muted">
+              {wallet.label}
             </span>
-            <DarkPill variant="ghost" onClick={() => void wallet.disconnect()}>
-              Disconnect
-            </DarkPill>
-          </>
-        ) : (
-          <>
-            <DarkPill onClick={() => void wallet.connectKit()} disabled={wallet.connecting}>
-              {wallet.connecting ? "Connecting…" : "Connect wallet"}
-            </DarkPill>
-            <DarkPill variant="ghost" onClick={() => setShowSecret((s) => !s)}>
-              test key
-            </DarkPill>
-          </>
-        )}
-      </div>
-
-      {showSecret && !wallet.address && (
-        <div className="flex w-full items-center gap-2 pt-2">
-          <input
-            className={inputCls}
-            placeholder="S… (testnet secret — demo only, stored locally)"
-            value={secret}
-            onChange={(e) => setSecret(e.target.value)}
-          />
-          <DarkPill variant="ghost" onClick={() => wallet.useTestSecret(secret)}>
-            Use
-          </DarkPill>
-        </div>
+          </span>
+          {wallet.demo && (
+            <span className="text-[11px] font-semibold uppercase tracking-[0.1em]" style={{ color: "#8F4E2A" }}>
+              demo key — testnet only
+            </span>
+          )}
+          <GhostButton onClick={() => void wallet.disconnect()}>Disconnect</GhostButton>
+        </>
+      ) : (
+        <>
+          <GhostButton onClick={() => void wallet.connectKit()} disabled={wallet.connecting}>
+            {wallet.connecting ? "Opening wallet…" : "Connect wallet"}
+          </GhostButton>
+          <button
+            type="button"
+            className="text-[13px] font-medium text-muted underline underline-offset-4"
+            onClick={() => setShowSecret((v) => !v)}
+          >
+            test secret instead
+          </button>
+          {showSecret && (
+            <form
+              className="flex items-center gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (secret.trim()) wallet.useTestSecret(secret);
+              }}
+            >
+              <TextInput
+                value={secret}
+                onChange={(e) => setSecret(e.target.value)}
+                placeholder="S… (testnet demo key)"
+                className="w-[240px] font-mono text-[13px]"
+                aria-label="Test secret key"
+              />
+              <button
+                type="submit"
+                className="rounded-full border px-5 py-2.5 text-[14px] font-medium transition-colors duration-200 hover:bg-cream"
+                style={{ borderColor: "var(--sand)", color: "var(--ink)" }}
+              >
+                Use key
+              </button>
+            </form>
+          )}
+        </>
       )}
       {wallet.error && (
-        <p className="w-full pt-2 font-mono text-xs text-ember">{wallet.error}</p>
+        <span className="text-[13px]" style={{ color: "#8F4E2A" }}>
+          {wallet.error}
+        </span>
       )}
-    </header>
+    </div>
   );
 }
